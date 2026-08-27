@@ -1,0 +1,53 @@
+name: SecureChat
+options:
+  bundleIdPrefix: com.securechat
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift.git
+    from: 6.29.0
+targets:
+  SecureChat:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/SecureChat
+    dependencies:
+      - package: GRDB
+        product: GRDB
+    info:
+      path: Sources/SecureChat/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: "SecureChat needs camera access to capture photos and videos to send in encrypted messages."
+        NSPhotoLibraryUsageDescription: "SecureChat needs photo library access to attach images and videos to encrypted messages."
+        NSFaceIDUsageDescription: "SecureChat uses Face ID to protect access to your conversations."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.securechat.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+  SecureChatTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/SecureChatTests
+    dependencies:
+      - target: SecureChat
+schemes:
+  SecureChat:
+    build:
+      targets:
+        SecureChat: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SecureChatTests

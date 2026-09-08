@@ -17,7 +17,6 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // FIX (Bug #2): blocking banner when the peer's identity keys changed.
             if viewModel.peerIdentityChanged {
                 IdentityChangedBanner(username: viewModel.peerUsername) {
                     showVerifyIdentity = true
@@ -34,39 +33,36 @@ struct ChatView: View {
                     }
                     .padding()
                 }
-                .onChange(of: viewModel.messages.count) { _ in
+                // FIX (Bug #26): two-parameter `onChange`, required from iOS 17.
+                .onChange(of: viewModel.messages.count) { _, _ in
                     if let last = viewModel.messages.last {
                         withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }
             }
 
-            // FIX (Bug #9): receive-side failures are now visible instead of being
-            // swallowed by `try?` in the listener loop.
+            // Receive-side failures are visible rather than swallowed (Bug #9).
             if let receiveError = viewModel.receiveError {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(receiveError)
-                        .font(.footnote)
-                    Spacer()
-                    Button {
-                        viewModel.dismissReceiveError()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .accessibilityLabel("Dismiss")
-                }
-                .padding(10)
-                .background(Color.orange.opacity(0.12))
+                NoticeBar(
+                    text: receiveError,
+                    tint: .orange,
+                    icon: "exclamationmark.triangle.fill",
+                    onDismiss: { viewModel.dismissReceiveError() }
+                )
             }
 
+            // FIX (Bug #17): send failures now explain themselves, and only offer a
+            // retry when retrying could actually succeed.
             if let error = viewModel.errorMessage {
-                Text(error)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal)
+                NoticeBar(
+                    text: error,
+                    tint: .red,
+                    icon: "xmark.octagon.fill",
+                    onDismiss: { viewModel.dismissSendError() },
+                    action: viewModel.canRetryLastSend
+                        ? .init(title: "Retry", handler: { Task { await viewModel.retryLastSend() } })
+                        : nil
+                )
             }
 
             MessageInputBar(
@@ -80,7 +76,6 @@ struct ChatView: View {
         .navigationTitle(viewModel.peerUsername)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            // FIX (Bug #2): entry point to out-of-band verification.
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     showVerifyIdentity = true
@@ -107,6 +102,41 @@ struct ChatView: View {
     private var verificationTint: Color {
         if viewModel.peerIdentityChanged { return .red }
         return viewModel.peerIsVerified ? .green : .secondary
+    }
+}
+
+private struct NoticeBar: View {
+    struct Action {
+        let title: String
+        let handler: () -> Void
+    }
+
+    let text: String
+    let tint: Color
+    let icon: String
+    let onDismiss: () -> Void
+    var action: Action?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            Text(text)
+                .font(.footnote)
+            Spacer()
+            if let action {
+                Button(action.title, action: action.handler)
+                    .font(.footnote.bold())
+                    .buttonStyle(.bordered)
+            }
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(10)
+        .background(tint.opacity(0.12))
     }
 }
 

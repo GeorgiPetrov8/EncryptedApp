@@ -2,19 +2,13 @@ import Foundation
 
 // MARK: - Public key material published to the server (X3DH)
 
-/// A single published one-time prekey. FIX (Bug #1): the server tracks prekeys
-/// individually so it can hand a *different* one to each peer.
+/// A single published one-time prekey (Bug #1).
 struct OneTimePreKeyPublic: Codable, Equatable {
     let id: UInt32
     let publicKey: Data
 }
 
-/// FIX (Bug #7): a rotated signed prekey, published on its own.
-///
-/// Rotation was previously impossible to complete end-to-end: `APIClientProtocol`
-/// only had `register`, and `MockBackendStore.bundlesByUserId` was written solely by
-/// `register()`. A client could generate a new signed prekey locally, but no peer
-/// would ever see it, so every initiator kept handshaking against the original key.
+/// A rotated signed prekey, published on its own (Bug #7).
 struct SignedPreKeyUpload: Codable, Equatable {
     let userId: String
     let signedPreKeyId: UInt32
@@ -22,9 +16,15 @@ struct SignedPreKeyUpload: Codable, Equatable {
     let signedPreKeySignature: Data
 }
 
-/// FIX (Bug #1): what the client *uploads* at registration (and tops up later).
+/// What the client uploads at registration (Bug #1).
 struct PreKeyBundleUpload: Codable, Equatable {
     let userId: String
+    /// FIX (Bug #11): the directory entry now carries the username.
+    ///
+    /// Without it the server had no way to answer "who is user X?", so
+    /// `resolveConversation` — which only ever sees a `senderId` — could not name
+    /// the peer and the whole list fell back to "Unknown".
+    let username: String
     let identityAgreementKey: Data     // raw X25519 public key
     let identitySigningKey: Data       // raw Ed25519 public key
     let signedPreKeyId: UInt32
@@ -38,6 +38,9 @@ struct PreKeyBundleUpload: Codable, Equatable {
 /// server decrypt anything (zero-knowledge principle from the spec).
 struct PreKeyBundle: Codable, Equatable {
     let userId: String
+    /// FIX (Bug #11): carried through so both the outbound and inbound paths can
+    /// name the peer from a single fetch.
+    let username: String
     let identityAgreementKey: Data
     let identitySigningKey: Data
     let signedPreKeyId: UInt32
@@ -53,11 +56,13 @@ struct PreKeyBundle: Codable, Equatable {
 /// responder can derive the same shared secret the initiator did.
 struct HandshakeInitPayload: Codable, Equatable {
     let identityAgreementKey: Data
-    /// FIX (Bug #2): the responder needs the initiator's signing key too, so it can
-    /// pin the full identity without trusting a separate server lookup.
+    /// The initiator's signing key, so the responder can pin the full identity (Bug #2).
     let identitySigningKey: Data
+    /// FIX (Bug #11): lets the responder name the initiator without a server round
+    /// trip, which matters because the responder may be offline-backfilling.
+    let senderUsername: String?
     let ephemeralPublicKey: Data
-    /// FIX (Bug #7): the responder must resolve *this* id, not its current key.
+    /// The responder must resolve *this* id, not its current key (Bug #7).
     let usedSignedPreKeyId: UInt32
     let usedOneTimePreKeyId: UInt32?
 }
@@ -78,6 +83,17 @@ struct EnvelopeDTO: Codable, Equatable {
     let ratchetMessage: Data
     let contentType: MessageContentType
     let createdAt: Date
+}
+
+/// FIX (Bug #12): the result of a backfill sync.
+///
+/// `cursor` is the point to resume from next time. It is returned by the server
+/// rather than derived from `createdAt` on the client, because `createdAt` is
+/// sender-supplied and two envelopes can share a timestamp — resuming from a
+/// timestamp would either re-deliver or skip messages at the boundary.
+struct PendingEnvelopesPage: Codable, Equatable {
+    let envelopes: [EnvelopeDTO]
+    let cursor: Int
 }
 
 struct RegisterRequest: Codable {

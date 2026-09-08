@@ -17,8 +17,7 @@ enum IdentityError: LocalizedError, Equatable {
     }
 }
 
-/// FIX (Bug #9): reasons an inbound envelope couldn't be turned into a message.
-/// Previously every one of these was erased by `try?`.
+/// Reasons an inbound envelope couldn't be turned into a message (Bug #9).
 enum ReceiveError: LocalizedError, Equatable {
     case noSessionForRatchetMessage(senderId: String)
     case notAuthenticated
@@ -43,8 +42,16 @@ enum ReceiveError: LocalizedError, Equatable {
 final class MessagingService: ObservableObject {
     @Published private(set) var incomingMessage: (conversationId: String, message: Message)?
     @Published private(set) var identityAlert: IdentityError?
-    /// FIX (Bug #9): the most recent receive failure, surfaced in `ChatView`.
     @Published private(set) var lastReceiveError: String?
+
+    /// FIX (Bug #25): observable connection state.
+    ///
+    /// `startListening` began with `guard let myUserId = ... else { return }` and gave
+    /// no indication when that guard fired. The app looked healthy while silently
+    /// receiving nothing.
+    @Published private(set) var isListening = false
+    /// FIX (Bug #12): true while the backfill sync is draining the queue.
+    @Published private(set) var isSyncing = false
 
     private let cryptoService: CryptoService
     private let apiClient: APIClientProtocol
@@ -54,6 +61,7 @@ final class MessagingService: ObservableObject {
     private let sessionRepository: SessionRepository
     private let userRepository: UserRepository
     private let authService: AuthService
+    private let syncCursors: SyncCursorStore
 
     private let logger = Logger(subsystem: "com.securechat", category: "messaging")
     private var listenerTask: Task<Void, Never>?
@@ -68,7 +76,8 @@ final class MessagingService: ObservableObject {
         messageRepository: MessageRepository,
         sessionRepository: SessionRepository,
         userRepository: UserRepository,
-        authService: AuthService
+        authService: AuthService,
+        syncCursors: SyncCursorStore = SyncCursorStore()
     ) {
         self.cryptoService = cryptoService
         self.apiClient = apiClient
@@ -78,30 +87,49 @@ final class MessagingService: ObservableObject {
         self.sessionRepository = sessionRepository
         self.userRepository = userRepository
         self.authService = authService
+        self.syncCursors = syncCursors
     }
 
-    /// Call once after login/registration to start receiving in real time.
+    /// Starts receiving. Driven by `AppContainer`'s subscription to the active
+    /// account (Bug #25) rather than being called by hand from three places.
     func startListening() {
         guard let myUserId = authService.currentUserId else {
-            logger.error("startListening called with no active account")
+            logger.error("startListening called with no active account; listener not started")
+            isListening = false
             return
         }
         listenerTask?.cancel()
-        listenerTask = Task {
-            for await envelope in webSocketService.events(for: myUserId) {
-                // FIX (Bug #9): was `try? await handleIncoming(envelope)`.
+        isListening = true
+
+        listenerTask = Task { [weak self] in
+            guard let self else { return }
+
+            // FIX (Bug #12): drain the durable queue *before* subscribing.
+            //
+            // Anything sent while this device wasn't listening only exists in the
+            // server-side queue. Subscribing first would leave those messages
+            // permanently unseen; the overlap between backfill and live stream is
+            // harmless because Bug #8's dedup makes redelivery idempotent.
+            await self.backfillPendingEnvelopes(myUserId: myUserId)
+
+            for await envelope in self.webSocketService.events(for: myUserId) {
                 do {
-                    try await handleIncoming(envelope)
+                    try await self.handleIncoming(envelope)
+                    try? await self.apiClient.acknowledge(userId: myUserId, envelopeIds: [envelope.id])
                 } catch {
-                    await handleReceiveFailure(error, envelope: envelope, myUserId: myUserId)
+                    await self.handleReceiveFailure(error, envelope: envelope, myUserId: myUserId)
                 }
             }
+            self.isListening = false
         }
+
         Task { await performStartupMaintenance() }
     }
 
     func stopListening() {
         listenerTask?.cancel()
+        listenerTask = nil
+        isListening = false
         if let myUserId = authService.currentUserId {
             webSocketService.disconnect(userId: myUserId)
         }
@@ -109,6 +137,43 @@ final class MessagingService: ObservableObject {
 
     func clearReceiveError() {
         lastReceiveError = nil
+    }
+
+    // MARK: Offline backfill (Bug #12)
+
+    /// Replays everything queued since this account's cursor, in server order.
+    func backfillPendingEnvelopes(myUserId: String) async {
+        isSyncing = true
+        defer { isSyncing = false }
+
+        do {
+            let page = try await apiClient.fetchPendingEnvelopes(
+                userId: myUserId,
+                since: syncCursors.cursor(for: myUserId)
+            )
+            guard !page.envelopes.isEmpty else { return }
+
+            var delivered: [String] = []
+            for envelope in page.envelopes {
+                do {
+                    try await handleIncoming(envelope)
+                    delivered.append(envelope.id)
+                } catch {
+                    await handleReceiveFailure(error, envelope: envelope, myUserId: myUserId)
+                    // Still acknowledge: the placeholder is persisted, so redelivering
+                    // would only reproduce the same failure.
+                    delivered.append(envelope.id)
+                }
+            }
+
+            // Advance the cursor only after the batch is durably stored, so a crash
+            // mid-sync resumes from the same point instead of skipping messages.
+            syncCursors.advance(to: page.cursor, for: myUserId)
+            try? await apiClient.acknowledge(userId: myUserId, envelopeIds: delivered)
+            logger.info("Backfilled \(page.envelopes.count, privacy: .public) envelopes")
+        } catch {
+            logger.error("Backfill sync failed; will retry on next listen")
+        }
     }
 
     // MARK: Startup maintenance
@@ -123,11 +188,7 @@ final class MessagingService: ObservableObject {
         }
     }
 
-    /// FIX (Bug #7): rotates the signed prekey and — crucially — publishes it.
-    ///
-    /// Local rotation alone would be invisible: the server kept serving the original
-    /// signed prekey, so every initiator would keep handshaking against a key we
-    /// intended to retire.
+    /// Rotates the signed prekey and publishes it (Bug #7).
     func rotateSignedPreKeyIfNeeded() async {
         guard let myUserId = authService.currentUserId else { return }
         do {
@@ -144,7 +205,7 @@ final class MessagingService: ObservableObject {
         }
     }
 
-    /// FIX (Bug #1): publishes a fresh batch when the local pool runs low.
+    /// Publishes a fresh batch when the local pool runs low (Bug #1).
     func replenishOneTimePreKeysIfNeeded() async {
         guard let myUserId = authService.currentUserId else { return }
         guard cryptoService.remainingOneTimePreKeyCount < Self.oneTimePreKeyLowWaterMark else { return }
@@ -157,7 +218,7 @@ final class MessagingService: ObservableObject {
         }
     }
 
-    // MARK: Identity pinning (Bug #2)
+    // MARK: Identity pinning (Bug #2) and contact caching (Bug #11)
 
     private func pinOrVerifyIdentity(
         userId: String,
@@ -180,6 +241,42 @@ final class MessagingService: ObservableObject {
         case .changePending:
             throw IdentityError.identityChangeUnacknowledged(userId: userId)
         }
+    }
+
+    /// FIX (Bug #11): guarantees a named `User` row exists for a peer.
+    ///
+    /// `startConversation` fetched a bundle and created the conversation but never
+    /// called `userRepository.upsert`, and `resolveConversation` had only a
+    /// `senderId`. The list read from `users` and fell back to "Unknown" every time.
+    ///
+    /// Order of preference: the name we were handed (handshake or bundle), then a
+    /// directory lookup, then nothing — the caller renders a shortened id.
+    @discardableResult
+    private func ensureContact(userId: String, username: String?) async -> User? {
+        if let existing = try? userRepository.fetch(id: userId) {
+            // Backfill a placeholder name once the real one becomes available.
+            if let username, existing.username != username {
+                try? userRepository.updateUsername(userId: userId, username: username)
+                return try? userRepository.fetch(id: userId)
+            }
+            return existing
+        }
+
+        if let username {
+            try? userRepository.upsertContactPlaceholder(userId: userId, username: username)
+            return try? userRepository.fetch(id: userId)
+        }
+
+        // Fallback: ask the directory. Pinning happens through the normal path, so
+        // this only fills in display data.
+        guard let bundle = try? await apiClient.fetchPreKeyBundle(forUserId: userId) else { return nil }
+        try? pinOrVerifyIdentity(
+            userId: bundle.userId,
+            username: bundle.username,
+            agreementKey: bundle.identityAgreementKey,
+            signingKey: bundle.identitySigningKey
+        )
+        return try? userRepository.fetch(id: userId)
     }
 
     func acknowledgeIdentityChange(userId: String) throws {
@@ -233,10 +330,13 @@ final class MessagingService: ObservableObject {
 
         try pinOrVerifyIdentity(
             userId: bundle.userId,
-            username: username,
+            username: bundle.username,
             agreementKey: bundle.identityAgreementKey,
             signingKey: bundle.identitySigningKey
         )
+        // FIX (Bug #11): cache the contact so the list can name them immediately,
+        // before any message has been exchanged.
+        await ensureContact(userId: bundle.userId, username: bundle.username)
 
         if let existing = try conversationRepository.findDirectConversation(
             ownerUserId: myUserId, userA: myUserId, userB: bundle.userId
@@ -244,10 +344,13 @@ final class MessagingService: ObservableObject {
             return existing
         }
 
+        // FIX (Bug #14): deterministic id, so the peer's independently-created
+        // conversation is the same conversation rather than a second one.
+        let participants = [myUserId, bundle.userId]
         let conversation = Conversation(
-            id: UUID().uuidString,
+            id: Conversation.deterministicId(participantIds: participants),
             ownerUserId: myUserId,
-            participantIds: [myUserId, bundle.userId],
+            participantIds: participants,
             isGroup: false,
             createdAt: Date()
         )
@@ -261,7 +364,41 @@ final class MessagingService: ObservableObject {
         try await send(plaintext: Data(text.utf8), contentType: .text, in: conversation)
     }
 
-    func send(plaintext: Data, contentType: MessageContentType, in conversation: Conversation) async throws {
+    /// FIX (Bug #13): media send path with the ordering corrected.
+    ///
+    /// Encrypt and upload first, then write the message and the media row together in
+    /// one transaction, then transmit. The media row can only be written once its
+    /// parent message exists, which is exactly what the old flow got backwards.
+    func sendMedia(
+        rawData: Data,
+        thumbnail: Data?,
+        mediaType: MediaType,
+        in conversation: Conversation,
+        using mediaService: MediaEncryptionService
+    ) async throws {
+        guard let myUserId = authService.currentUserId else { throw APIError.notAuthenticated }
+
+        let prepared = try await mediaService.prepareForSending(
+            rawData: rawData,
+            thumbnail: thumbnail,
+            mediaType: mediaType,
+            ownerUserId: myUserId
+        )
+
+        try await send(
+            plaintext: prepared.messagePayload,
+            contentType: mediaType == .image ? .image : .video,
+            in: conversation,
+            media: prepared.pendingMediaItem
+        )
+    }
+
+    func send(
+        plaintext: Data,
+        contentType: MessageContentType,
+        in conversation: Conversation,
+        media: MediaItem? = nil
+    ) async throws {
         guard let myUserId = authService.currentUserId,
               let identity = cryptoService.identity else { throw APIError.notAuthenticated }
         guard let peerId = conversation.otherParticipant(myUserId: myUserId) else { throw APIError.userNotFound }
@@ -283,7 +420,8 @@ final class MessagingService: ObservableObject {
             deliveryStatus: .sending,
             createdAt: Date()
         )
-        try messageRepository.insert(message)
+        // Message row first, attachment second, one transaction (Bug #13).
+        try messageRepository.insert(message, media: media)
 
         do {
             var handshake: HandshakeInitPayload?
@@ -297,10 +435,11 @@ final class MessagingService: ObservableObject {
 
                     try pinOrVerifyIdentity(
                         userId: peerId,
-                        username: nil,
+                        username: bundle.username,
                         agreementKey: bundle.identityAgreementKey,
                         signingKey: bundle.identitySigningKey
                     )
+                    await ensureContact(userId: peerId, username: bundle.username)
 
                     let result = try X3DH.initiate(myIdentity: identity, bundle: bundle)
                     let session = try DoubleRatchetSession(
@@ -312,6 +451,9 @@ final class MessagingService: ObservableObject {
                     handshake = HandshakeInitPayload(
                         identityAgreementKey: identity.agreementPublicKey.rawRepresentation,
                         identitySigningKey: identity.signingPublicKey.rawRepresentation,
+                        // FIX (Bug #11): carry our name so the responder can label the
+                        // conversation without a directory round trip.
+                        senderUsername: authService.currentUsername,
                         ephemeralPublicKey: result.ephemeralPublicKey.rawRepresentation,
                         usedSignedPreKeyId: bundle.signedPreKeyId,
                         usedOneTimePreKeyId: result.usedOneTimePreKeyId
@@ -348,18 +490,10 @@ final class MessagingService: ObservableObject {
     // MARK: Receiving
 
     private func handleIncoming(_ envelope: EnvelopeDTO) async throws {
-        // FIX (Bug #9): these were silent `return`s. The middle one — a ratchet
-        // message with no session — is precisely the case worth seeing, and it
-        // vanished without a trace.
         guard let myUserId = authService.currentUserId else { throw ReceiveError.notAuthenticated }
         guard let identity = cryptoService.identity else { throw ReceiveError.notAuthenticated }
 
-        // FIX (Bug #8): check *before* touching the ratchet.
-        //
-        // The ticket assumed a duplicate would be caught by the primary-key conflict
-        // on insert. It is — but only after `decrypt` has already rotated
-        // `receivingChainKey` and `persistSessionState` has written the mutated state
-        // to disk. The damage is done before the conflict is raised.
+        // Dedup before touching the ratchet (Bug #8).
         if try messageRepository.isEnvelopeProcessed(
             envelopeId: envelope.id, recipientUserId: myUserId, senderId: envelope.senderId
         ) {
@@ -373,17 +507,12 @@ final class MessagingService: ObservableObject {
             } else if envelope.kind == .handshake, let handshake = envelope.handshake {
                 try pinOrVerifyIdentity(
                     userId: envelope.senderId,
-                    username: nil,
+                    username: handshake.senderUsername,
                     agreementKey: handshake.identityAgreementKey,
                     signingKey: handshake.identitySigningKey
                 )
 
-                // FIX (Bug #7): resolve the signed prekey the initiator actually used.
-                //
-                // The old `requireSignedPreKey()` returned whatever the current key
-                // happened to be and ignored `usedSignedPreKeyId` entirely. That was
-                // harmless only because the key never rotated; with rotation it would
-                // silently derive a different root key on each side.
+                // Resolve the signed prekey the initiator actually used (Bug #7).
                 let mySignedPreKey = try cryptoService.signedPreKey(withId: handshake.usedSignedPreKeyId)
 
                 let myOneTimePreKey = try handshake.usedOneTimePreKeyId.flatMap {
@@ -413,9 +542,11 @@ final class MessagingService: ObservableObject {
         }
 
         let ratchetMessage = try RatchetMessage.deserialize(envelope.ratchetMessage)
-        // Atomic since Bug #3: a rejected message rolls the session back cleanly.
         let plaintext = try session.decrypt(ratchetMessage)
         try persistSessionState(for: envelope.senderId, ownerUserId: myUserId)
+
+        // FIX (Bug #11): make sure the sender has a named row before the list refreshes.
+        await ensureContact(userId: envelope.senderId, username: envelope.handshake?.senderUsername)
 
         let conversation = try await resolveConversation(
             with: envelope, plaintextPeerId: envelope.senderId, myUserId: myUserId
@@ -433,7 +564,6 @@ final class MessagingService: ObservableObject {
             createdAt: envelope.createdAt
         )
 
-        // FIX (Bug #8): message row and dedup marker in one transaction.
         let inserted = try messageRepository.insertIfNotProcessed(
             message,
             envelopeId: envelope.id,
@@ -448,9 +578,9 @@ final class MessagingService: ObservableObject {
         incomingMessage = (conversation.id, message)
     }
 
-    /// FIX (Bug #9): logs the failure and leaves a visible marker in the conversation.
+    /// Logs the failure and leaves a visible marker in the conversation (Bug #9).
     private func handleReceiveFailure(_ error: Error, envelope: EnvelopeDTO, myUserId: String) async {
-        // Never log plaintext or key material — only the routing metadata.
+        // Never log plaintext or key material — only routing metadata.
         logger.error("""
             Failed to process envelope \(envelope.id, privacy: .public) \
             from \(envelope.senderId, privacy: .public): \
@@ -466,8 +596,6 @@ final class MessagingService: ObservableObject {
         lastReceiveError = (error as? LocalizedError)?.errorDescription
             ?? ReceiveError.decryptionFailed.localizedDescription
 
-        // Leave a placeholder so the gap in the conversation is visible rather than
-        // the message simply never appearing.
         await insertUndecryptablePlaceholder(for: envelope, myUserId: myUserId)
     }
 
@@ -501,18 +629,42 @@ final class MessagingService: ObservableObject {
         }
     }
 
+    /// FIX (Bug #14): the conversation id is derived, not taken from the envelope.
+    ///
+    /// Trusting `envelope.conversationId` was half of the split-history problem: the
+    /// sender's locally-generated UUID became a second conversation on the receiving
+    /// side whenever the receiver had already created their own.
+    ///
+    /// For 1:1 chats both sides can compute the same id from the participants, so the
+    /// envelope's value is only used as a diagnostic signal.
     private func resolveConversation(
         with envelope: EnvelopeDTO,
         plaintextPeerId: String,
         myUserId: String
     ) async throws -> Conversation {
-        if let existing = try conversationRepository.fetch(id: envelope.conversationId, ownerUserId: myUserId) {
+        let participants = [myUserId, plaintextPeerId]
+        let canonicalId = Conversation.deterministicId(participantIds: participants)
+
+        if canonicalId != envelope.conversationId {
+            logger.debug("Envelope carried a non-canonical conversation id; using the derived one")
+        }
+
+        if let existing = try conversationRepository.fetch(id: canonicalId, ownerUserId: myUserId) {
             return existing
         }
+
+        // A conversation created before this change may still exist under the old
+        // random id — adopt it rather than starting a parallel history.
+        if let legacy = try conversationRepository.findDirectConversation(
+            ownerUserId: myUserId, userA: myUserId, userB: plaintextPeerId
+        ) {
+            return legacy
+        }
+
         let conversation = Conversation(
-            id: envelope.conversationId,
+            id: canonicalId,
             ownerUserId: myUserId,
-            participantIds: [myUserId, plaintextPeerId],
+            participantIds: participants,
             isGroup: false,
             createdAt: envelope.createdAt
         )
@@ -527,13 +679,7 @@ final class MessagingService: ObservableObject {
 
     // MARK: Display
 
-    /// Decrypts a stored message's local-storage ciphertext for display.
-    ///
-    /// FIX (Bug #9): the three failure modes are now distinguishable. Previously all
-    /// of them rendered the identical string "🔒 Unable to decrypt message", which
-    /// meant the symptom of Bug #10 (storage key overwritten by a second
-    /// registration) looked exactly like the symptom of a tampered envelope —
-    /// making either one impossible to diagnose from the UI.
+    /// Decrypts a stored message's local-storage ciphertext for display (Bug #9).
     func displayText(for message: Message) -> String {
         if message.isUndecryptable {
             return "⚠️ This message couldn't be decrypted"
@@ -545,6 +691,32 @@ final class MessagingService: ObservableObject {
             return "⚠️ Message content is malformed"
         }
         return text
+    }
+
+    /// FIX (Bug #18): the single place that decides what a message looks like in a
+    /// one-line summary.
+    ///
+    /// `ConversationListViewModel` called `plaintext(for:)` unconditionally, so for a
+    /// media message it rendered the raw `MediaKeyPayload` JSON — which contains the
+    /// base64 per-file AES key. That put key material into a `String`, into the chat
+    /// list, and therefore into screenshots and the app-switcher snapshot.
+    ///
+    /// Media types never reach the decryption branch here, so the payload cannot be
+    /// stringified by accident again.
+    func previewText(for message: Message) -> String {
+        if message.isUndecryptable {
+            return "⚠️ Couldn't be decrypted"
+        }
+        switch message.contentType {
+        case .text:
+            return displayText(for: message)
+        case .image:
+            return "📷 Photo"
+        case .video:
+            return "🎥 Video"
+        case .file:
+            return "📎 File"
+        }
     }
 
     /// Retained for source compatibility with existing callers.

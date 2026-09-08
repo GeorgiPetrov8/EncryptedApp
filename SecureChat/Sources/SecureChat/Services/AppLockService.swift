@@ -13,6 +13,17 @@ final class AppLockService: ObservableObject {
         didSet { UserDefaults.standard.set(autoLockMinutes, forKey: Keys.minutes) }
     }
 
+    /// FIX (Bug #24): drives the privacy overlay.
+    ///
+    /// iOS captures the app-switcher snapshot on the transition to `.inactive`, which
+    /// happens *before* `.background`. The old code only handled `.background`, so by
+    /// the time anything reacted the screenshot of the open conversation had already
+    /// been taken — and it persists in the switcher even with App Lock enabled.
+    ///
+    /// This is deliberately independent of `isEnabled`: the snapshot leaks message
+    /// content regardless of whether the user opted into biometric locking.
+    @Published private(set) var isObscured = false
+
     private var backgroundedAt: Date?
 
     private enum Keys {
@@ -27,11 +38,23 @@ final class AppLockService: ObservableObject {
         isLocked = enabled
     }
 
+    /// FIX (Bug #24): called on `.inactive`, before the snapshot is taken.
+    func appWillResignActive() {
+        isObscured = true
+    }
+
     func appDidEnterBackground() {
+        isObscured = true
         backgroundedAt = Date()
     }
 
     func appWillEnterForeground() {
+        defer {
+            // Only reveal content once we're certain it isn't about to be locked.
+            // If App Lock engages, `AppLockView` covers the screen anyway and the
+            // overlay is redundant.
+            isObscured = false
+        }
         guard isEnabled else { return }
         guard let backgroundedAt else { return }
         let elapsedMinutes = Date().timeIntervalSince(backgroundedAt) / 60
@@ -53,7 +76,10 @@ final class AppLockService: ObservableObject {
                 .deviceOwnerAuthentication,
                 localizedReason: "Unlock SecureChat"
             )
-            if success { isLocked = false }
+            if success {
+                isLocked = false
+                isObscured = false
+            }
             return success
         } catch {
             return false

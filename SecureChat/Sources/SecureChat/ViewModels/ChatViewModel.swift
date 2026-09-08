@@ -17,9 +17,14 @@ final class ChatViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var isSending = false
 
-    /// FIX (Bug #9): receive-side failures, mirrored from `MessagingService`.
-    @Published private(set) var receiveError: String?
+    /// FIX (Bug #17): whether the last failure is worth retrying.
+    ///
+    /// Retrying `awaitingFirstMessage` succeeds as soon as the peer replies; retrying
+    /// `invalidSignature` never will. Presenting both identically trained users to
+    /// ignore the difference, so the retry affordance is now conditional.
+    @Published private(set) var canRetryLastSend = false
 
+    @Published private(set) var receiveError: String?
     @Published private(set) var peerUsername: String = "Unknown"
     @Published private(set) var peerId: String?
     @Published private(set) var peerIsVerified = false
@@ -30,6 +35,9 @@ final class ChatViewModel: ObservableObject {
     private let messagingService: MessagingService
     private let authService: AuthService
     private var cancellables = Set<AnyCancellable>()
+
+    /// Held so the retry button can resend exactly what failed.
+    private var lastFailedDraft: String?
 
     init(
         conversation: Conversation,
@@ -45,7 +53,12 @@ final class ChatViewModel: ObservableObject {
         messagingService.$incomingMessage
             .compactMap { $0 }
             .filter { $0.conversationId == conversation.id }
-            .sink { [weak self] _ in self?.reload() }
+            .sink { [weak self] _ in
+                self?.reload()
+                // A message from the peer is exactly what unblocks
+                // `awaitingFirstMessage`, so refresh the retry affordance.
+                self?.reloadPeer()
+            }
             .store(in: &cancellables)
 
         messagingService.$identityAlert
@@ -64,7 +77,8 @@ final class ChatViewModel: ObservableObject {
         do {
             guard let peer = try messagingService.peer(for: conversation) else { return }
             peerId = peer.id
-            peerUsername = peer.username
+            // FIX (Bug #11): fall back to a shortened id rather than "Unknown".
+            peerUsername = peer.username.isEmpty ? String(peer.id.prefix(8)) : peer.username
             peerIsVerified = peer.isVerified
             peerIdentityChanged = peer.hasUnacknowledgedIdentityChange
         } catch {
@@ -75,7 +89,6 @@ final class ChatViewModel: ObservableObject {
     func reload() {
         guard let myUserId = authService.currentUserId else { return }
         do {
-            // FIX (Bug #10): scoped to the signed-in account.
             let stored = try messageRepository.fetchMessages(
                 conversationId: conversation.id,
                 ownerUserId: myUserId
@@ -84,7 +97,9 @@ final class ChatViewModel: ObservableObject {
                 DisplayMessage(
                     id: message.id,
                     isMine: message.senderId == myUserId,
-                    text: displayText(for: message),
+                    // FIX (Bug #18): shared helper, so the bubble and the list summary
+                    // can never disagree about how a media message is rendered.
+                    text: messagingService.previewText(for: message),
                     contentType: message.contentType,
                     status: message.deliveryStatus,
                     createdAt: message.createdAt
@@ -95,20 +110,22 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func displayText(for message: Message) -> String {
-        // Undecryptable placeholders carry no content, so the content-type branch
-        // must not run for them.
-        if message.isUndecryptable {
-            return messagingService.displayText(for: message)
-        }
-        return message.contentType == .text
-            ? messagingService.displayText(for: message)
-            : "[\(message.contentType.rawValue) message]"
-    }
-
     func dismissReceiveError() {
         messagingService.clearReceiveError()
         receiveError = nil
+    }
+
+    func dismissSendError() {
+        errorMessage = nil
+        canRetryLastSend = false
+        lastFailedDraft = nil
+    }
+
+    /// FIX (Bug #17): re-attempts the send that failed recoverably.
+    func retryLastSend() async {
+        guard let draft = lastFailedDraft else { return }
+        draftText = draft
+        await send()
     }
 
     func send() async {
@@ -117,20 +134,38 @@ final class ChatViewModel: ObservableObject {
 
         guard !peerIdentityChanged else {
             errorMessage = IdentityError.identityChangeUnacknowledged(userId: peerId ?? "").localizedDescription
+            canRetryLastSend = false
             return
         }
 
         draftText = ""
         isSending = true
         defer { isSending = false }
+
         do {
             try await messagingService.sendText(text, in: conversation)
+            errorMessage = nil
+            canRetryLastSend = false
+            lastFailedDraft = nil
+            reload()
+        } catch let cryptoError as CryptoError {
+            // FIX (Bug #17): a described error and an honest retry affordance,
+            // replacing "Couldn't send message: The operation couldn't be completed."
+            errorMessage = cryptoError.localizedDescription
+            canRetryLastSend = cryptoError.isRecoverable
+            lastFailedDraft = cryptoError.isRecoverable ? text : nil
             reload()
         } catch let identityError as IdentityError {
             reloadPeer()
             errorMessage = identityError.localizedDescription
+            canRetryLastSend = false
+            lastFailedDraft = nil
         } catch {
             errorMessage = error.localizedDescription
+            // Network-shaped failures are worth another attempt.
+            canRetryLastSend = true
+            lastFailedDraft = text
+            reload()
         }
     }
 }

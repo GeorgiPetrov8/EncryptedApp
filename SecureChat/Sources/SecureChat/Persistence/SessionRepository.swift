@@ -1,12 +1,11 @@
 import Foundation
 import GRDB
 
-/// FIX (Bug #10): sessions are scoped to the owning account.
+/// Sessions are scoped to the owning account (Bug #10).
 ///
 /// The v1 schema made `otherUserId` globally unique, so two accounts on the same
 /// device talking to the same peer overwrote each other's ratchet state — and each
-/// would then fail to decrypt the other's, because the storage keys differ per
-/// account. Uniqueness is now `(ownerUserId, otherUserId)`.
+/// would then fail to decrypt the other's, because storage keys differ per account.
 final class SessionRepository {
     private let dbQueue: DatabaseQueue
     init(dbQueue: DatabaseQueue) { self.dbQueue = dbQueue }
@@ -43,7 +42,6 @@ final class SessionRepository {
         }
     }
 
-    /// FIX (Bug #10): used by `deleteAccount`.
     func deleteAll(ownerUserId: String) throws {
         try dbQueue.write { db in
             _ = try SessionRecord.filter(Column("ownerUserId") == ownerUserId).deleteAll(db)

@@ -5,11 +5,14 @@ import Combine
 ///
 /// They validated length and confirmation, then handed the value to `AuthService`,
 /// which derived a PBKDF2 key and discarded it. Nothing in the app ever checked a
-/// password again — `login` succeeded for any string. Keeping the fields would have
-/// meant keeping a security promise the code doesn't make.
+/// password again — `login` succeeded for any string.
 ///
-/// Local protection now comes from `AppLockService` (Face ID / Touch ID / passcode)
-/// plus `.userPresence` access control on the storage key in the Keychain.
+/// FIX (Bug #25): no longer holds a `MessagingService`.
+///
+/// It used to call `messagingService.startListening()` after each successful
+/// login/register. That responsibility now sits in `AppContainer`, which observes
+/// the active account — so there is exactly one place that starts the listener and
+/// it cannot be forgotten on a new sign-in path.
 @MainActor
 final class AuthViewModel: ObservableObject {
     @Published var username = ""
@@ -17,11 +20,9 @@ final class AuthViewModel: ObservableObject {
     @Published var isLoading = false
 
     private let authService: AuthService
-    private let messagingService: MessagingService
 
-    init(authService: AuthService, messagingService: MessagingService) {
+    init(authService: AuthService) {
         self.authService = authService
-        self.messagingService = messagingService
     }
 
     private var trimmedUsername: String {
@@ -37,7 +38,6 @@ final class AuthViewModel: ObservableObject {
         defer { isLoading = false }
         do {
             try await authService.login(username: trimmedUsername)
-            messagingService.startListening()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -53,7 +53,6 @@ final class AuthViewModel: ObservableObject {
         defer { isLoading = false }
         do {
             try await authService.register(username: trimmedUsername)
-            messagingService.startListening()
         } catch {
             errorMessage = error.localizedDescription
         }

@@ -9,15 +9,12 @@ import Security
 /// Note on Secure Enclave: the Secure Enclave only supports P-256 key
 /// agreement/signing, not Curve25519 (X25519/Ed25519) used by X3DH/Double
 /// Ratchet here. So identity keys below are software keys protected by the
-/// Keychain's own encryption, not SE-backed. If you need SE-backed keys,
-/// you'd need to move the protocol to P-256, which is a bigger change.
+/// Keychain's own encryption, not SE-backed.
 ///
-/// FIX (Bug #10): every account's key material now lives under a per-user
-/// namespace. Previously all accounts shared one flat set of accounts within
-/// service `com.securechat.keys`, so registering a second account silently
-/// overwrote the first account's `localStorageKey` and identity — destroying
-/// the first account's history and, worse, letting a login as user B load
-/// user A's identity keys.
+/// FIX (Bug #10): every account's key material lives under a per-user namespace.
+/// Previously all accounts shared one flat set of accounts within service
+/// `com.securechat.keys`, so registering a second account silently overwrote the
+/// first account's `localStorageKey` and identity.
 final class KeychainStore {
     enum KeychainError: Error { case unhandled(OSStatus), notFound, accessControlFailed }
 
@@ -27,9 +24,8 @@ final class KeychainStore {
         self.service = service
     }
 
-    /// Namespaces a logical key name to a specific account.
-    /// Kept as a single function so the format can never drift between
-    /// save/load/delete paths.
+    /// Namespaces a logical key name to a specific account. Kept as a single function
+    /// so the format can never drift between save/load/delete paths.
     static func namespaced(_ key: String, userId: String) -> String {
         "\(userId)::\(key)"
     }
@@ -129,20 +125,22 @@ final class KeychainStore {
     }
 }
 
-// NOTE (Bug #6): `PBKDF2` has been removed.
+// NOTE (Bugs #6 and #21): `PBKDF2` has been removed.
 //
 // It existed solely to derive a key from the user's password in
 // `AuthService.register`, where the result was immediately discarded with `_ =`.
 // The password guarded nothing: `login` never used it, and `MockBackendStore.login`
 // resolved an account by username alone.
 //
-// Rather than build a real passphrase-gated unlock on top of a hand-rolled,
-// main-thread-blocking KDF, SecureChat now relies on the platform: the local storage
-// key is stored with `.userPresence` access control (see `CryptoService`), so reading
-// it requires Face ID / Touch ID / device passcode. That is stronger than a
-// user-chosen password, cannot be forgotten, and involves no custom crypto.
+// That also resolves Bug #21 outright. The implementation ran 150,000 iterations of
+// pure-Swift HMAC synchronously on `@MainActor`, which would have frozen the UI for
+// seconds on a real device. Rather than move a hand-rolled KDF off the main thread,
+// the dependency on it is gone: the local storage key is stored with `.userPresence`
+// access control (see `CryptoService`), so reading it requires Face ID / Touch ID /
+// device passcode. That is stronger than a user-chosen password, cannot be
+// forgotten, and involves no custom crypto.
 //
 // If you later need cross-device key escrow (where a password genuinely is the only
 // option because the Secure Enclave can't travel), reintroduce a KDF — but use
-// `CCKeyDerivationPBKDF` from CommonCrypto, off the main actor, and derive from a
-// per-account salt.
+// `CCKeyDerivationPBKDF` from CommonCrypto, off the main actor, with a per-account
+// salt.

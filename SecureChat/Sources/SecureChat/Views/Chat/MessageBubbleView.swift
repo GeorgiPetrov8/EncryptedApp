@@ -49,12 +49,30 @@ struct MessageBubbleView: View {
                         .strokeBorder(.orange, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 )
         } else {
-            Text(message.text)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(message.isMine ? Color.accentColor : Color(.secondarySystemBackground))
-                .foregroundStyle(message.isMine ? .white : .primary)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            HStack(spacing: 6) {
+                // FIX (Bug #18): media renders as an icon plus a label. The body of a
+                // media message is a key-bearing JSON payload and must never reach a
+                // `Text` view.
+                if let icon = mediaIcon {
+                    Image(systemName: icon)
+                        .font(.footnote)
+                }
+                Text(message.text)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(message.isMine ? Color.accentColor : Color(.secondarySystemBackground))
+            .foregroundStyle(message.isMine ? .white : .primary)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    private var mediaIcon: String? {
+        switch message.contentType {
+        case .text: return nil
+        case .image: return "photo"
+        case .video: return "video"
+        case .file: return "paperclip"
         }
     }
 

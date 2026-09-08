@@ -37,10 +37,6 @@ struct IdentityKeyPair {
 
 /// Medium-term key, rotated periodically, signed by the identity key so a
 /// peer can trust it came from that identity.
-///
-/// FIX (Bug #7): now carries `createdAt`. Rotation needs to know a key's age, and
-/// the responder needs to keep superseded keys around for a grace period so that
-/// handshakes already in flight against the previous prekey still succeed.
 struct SignedPreKey {
     let id: UInt32
     let privateKey: Curve25519.KeyAgreement.PrivateKey
@@ -69,10 +65,8 @@ struct SignedPreKey {
 /// One-time prekeys give the very first message extra forward secrecy.
 /// Each is consumed (deleted) after a single use by the responder.
 ///
-/// NOTE (Bug #1): `CryptoService.generateOneTimePreKeys` is now the only producer,
-/// because it also owns the monotonic id allocator and the Keychain persistence.
-/// `generateBatch` below is unused and kept only to avoid breaking any external
-/// reference; prefer the service.
+/// NOTE (Bug #1): `CryptoService.generateOneTimePreKeys` is the only producer,
+/// because it also owns the monotonic id allocator and Keychain persistence.
 struct OneTimePreKey {
     let id: UInt32
     let privateKey: Curve25519.KeyAgreement.PrivateKey
@@ -84,20 +78,26 @@ struct OneTimePreKey {
     }
 }
 
-enum CryptoError: LocalizedError {
+/// FIX (Bug #17): every case now carries text a person can act on.
+///
+/// `ChatViewModel.send` surfaced these directly, so a responder trying to reply
+/// before the handshake completed saw "Couldn't send message: The operation couldn't
+/// be completed." — which tells the user nothing about what went wrong or whether
+/// retrying would help.
+enum CryptoError: LocalizedError, Equatable {
     case invalidKeyData
     case invalidSignature
     case sessionNotReady
+    /// Distinct from `sessionNotReady`: the session exists and is healthy, it just
+    /// hasn't seen the peer's first message yet. This one resolves on its own.
+    case awaitingFirstMessage
+    case tooManySkippedMessages
     case sealFailed
     case unknownPreKeyId
     case noOneTimePreKeysAvailable
-    /// FIX (Bug #10): raised when `CryptoService` is used before an account is bound.
     case noActiveAccount
-    /// FIX (Bug #10): raised instead of silently overwriting existing key material.
     case identityAlreadyExists
 
-    /// FIX (Bug #9): crypto failures now reach the UI, so they need text a person
-    /// can act on rather than "The operation couldn't be completed."
     var errorDescription: String? {
         switch self {
         case .invalidKeyData:
@@ -105,7 +105,11 @@ enum CryptoError: LocalizedError {
         case .invalidSignature:
             return "The contact's prekey signature didn't verify."
         case .sessionNotReady:
-            return "This conversation isn't established yet — wait for the first message from your contact."
+            return "This conversation's encryption state is unusable. Start a new conversation with this contact."
+        case .awaitingFirstMessage:
+            return "Waiting for your contact's first message — the secure channel isn't established in both directions yet."
+        case .tooManySkippedMessages:
+            return "Too many messages are missing from this conversation to catch up safely."
         case .sealFailed:
             return "Encryption failed."
         case .unknownPreKeyId:
@@ -116,6 +120,22 @@ enum CryptoError: LocalizedError {
             return "No account is currently active on this device."
         case .identityAlreadyExists:
             return "Key material already exists for this account."
+        }
+    }
+
+    /// FIX (Bug #17): lets the UI offer a retry only where retrying can actually work.
+    ///
+    /// Retrying `awaitingFirstMessage` succeeds once the peer replies; retrying
+    /// `invalidSignature` never will. Presenting both identically trained users to
+    /// ignore the difference.
+    var isRecoverable: Bool {
+        switch self {
+        case .awaitingFirstMessage, .tooManySkippedMessages:
+            return true
+        case .invalidKeyData, .invalidSignature, .sessionNotReady, .sealFailed,
+             .unknownPreKeyId, .noOneTimePreKeysAvailable, .noActiveAccount,
+             .identityAlreadyExists:
+            return false
         }
     }
 }

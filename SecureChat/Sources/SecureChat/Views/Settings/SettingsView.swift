@@ -12,9 +12,28 @@ struct SettingsView: View {
                     LabeledContent("Username", value: username)
                 }
                 Button("Log Out") {
-                    container.messagingService.stopListening()
+                    // The listener stop and media-cache clear happen in the logout
+                    // handler wired up by AppContainer (Bugs #23, #25).
                     container.authService.logout()
                 }
+            }
+
+            Section {
+                LabeledContent("Connection") {
+                    Text(container.messagingService.isListening ? "Connected" : "Not connected")
+                        .foregroundStyle(container.messagingService.isListening ? .green : .orange)
+                }
+                if !container.messagingService.isListening {
+                    // FIX (Bug #25): a manual recovery path, now that the state is
+                    // actually observable.
+                    Button("Reconnect") {
+                        container.messagingService.startListening()
+                    }
+                }
+            } header: {
+                Text("Sync")
+            } footer: {
+                Text("SecureChat downloads anything sent while you were offline the next time it connects.")
             }
 
             Section {
@@ -37,12 +56,10 @@ struct SettingsView: View {
             } footer: {
                 // FIX (Bug #6): with the password removed, this is the honest
                 // description of what actually protects local data.
-                Text("SecureChat has no password. Your message history is encrypted with a key held in this device's Keychain and released only after you authenticate. App Lock additionally locks the interface after being backgrounded.")
+                Text("SecureChat has no password. Your message history is encrypted with a key held in this device's Keychain and released only after you authenticate. The conversation is also hidden in the app switcher.")
             }
 
-            // FIX (Bug #10): deletion is now explicit, isolated, and clearly labelled.
-            // Previously the only way to lose an account's data was the *accidental*
-            // one — registering a second account silently overwrote the storage key.
+            // Deletion is explicit, isolated, and clearly labelled (Bug #10).
             Section {
                 Button("Delete Account and All Data", role: .destructive) {
                     showDeleteConfirmation = true
@@ -50,7 +67,7 @@ struct SettingsView: View {
             } header: {
                 Text("Danger Zone")
             } footer: {
-                Text("Permanently removes this account's keys, conversations, and messages from this device. This cannot be undone — the keys can't be recovered from anywhere else.")
+                Text("Permanently removes this account's keys, conversations, messages, and cached attachments from this device. This cannot be undone.")
             }
 
             if let errorMessage {

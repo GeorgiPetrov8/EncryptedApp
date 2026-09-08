@@ -9,18 +9,28 @@ final class MessageRepository {
         try dbQueue.write { db in try message.insert(db) }
     }
 
-    /// FIX (Bug #8): atomically stores an inbound message *and* marks its envelope
-    /// as processed.
+    /// FIX (Bug #13): message and its media row in one transaction.
     ///
-    /// These have to share one transaction. The original plan of "record the id in
-    /// the same transaction as the insert" was not achievable from `MessagingService`,
-    /// because `insert` opened its own `dbQueue.write` — a crash between the two
-    /// writes would leave the message stored but the envelope unmarked (so a redelivery
-    /// would advance the ratchet again), or the reverse.
+    /// The media table has a `NOT NULL` foreign key to `messages(id)`, so the message
+    /// must exist first. Doing the two inserts as separate `dbQueue.write` blocks
+    /// would allow a message with a dangling attachment (or an orphan media row) if
+    /// the process died in between.
     ///
-    /// Returns `false` when the envelope was already processed, in which case nothing
-    /// is written. The uniqueness check happens inside the transaction, so two
-    /// concurrent deliveries of the same envelope cannot both pass it.
+    /// `media.messageId` is set here rather than trusted from the caller, so the two
+    /// rows can't disagree.
+    func insert(_ message: Message, media: MediaItem?) throws {
+        try dbQueue.write { db in
+            try message.insert(db)
+            if var media {
+                media.messageId = message.id
+                media.ownerUserId = message.ownerUserId
+                try media.insert(db)
+            }
+            try Self.touchConversation(db, message: message)
+        }
+    }
+
+    /// Atomically stores an inbound message and marks its envelope processed (Bug #8).
     @discardableResult
     func insertIfNotProcessed(
         _ message: Message,
@@ -44,17 +54,23 @@ final class MessageRepository {
                 envelopeId: envelopeId,
                 receivedAt: Date()
             ).insert(db)
+            try Self.touchConversation(db, message: message)
             return true
         }
     }
 
-    /// FIX (Bug #8): cheap pre-check before touching the ratchet at all.
-    ///
-    /// This is the check that actually prevents the damage. Decrypting a replayed
-    /// envelope advances `receivingChainKey` and persists the mutated session, and
-    /// only *then* did the old code hit a primary-key conflict on insert — which
-    /// `try?` in `startListening` swallowed. The session was left mutated, the
-    /// message never appeared, and nothing was logged.
+    /// FIX (Bug #15): maintains the denormalised ordering column in the same
+    /// transaction as the insert, so the list can never disagree with the history.
+    private static func touchConversation(_ db: Database, message: Message) throws {
+        try db.execute(sql: """
+            UPDATE conversations
+            SET lastMessageAt = ?
+            WHERE id = ? AND ownerUserId = ?
+              AND (lastMessageAt IS NULL OR lastMessageAt < ?)
+            """, arguments: [message.createdAt, message.conversationId, message.ownerUserId, message.createdAt])
+    }
+
+    /// Cheap pre-check before touching the ratchet at all (Bug #8).
     func isEnvelopeProcessed(envelopeId: String, recipientUserId: String, senderId: String) throws -> Bool {
         try dbQueue.read { db in
             try ProcessedEnvelope
@@ -65,7 +81,6 @@ final class MessageRepository {
         }
     }
 
-    /// FIX (Bug #8): housekeeping so the dedup table doesn't grow without bound.
     func pruneProcessedEnvelopes(olderThan interval: TimeInterval = 30 * 24 * 60 * 60) throws {
         let cutoff = Date().addingTimeInterval(-interval)
         try dbQueue.write { db in
@@ -82,7 +97,6 @@ final class MessageRepository {
         }
     }
 
-    /// FIX (Bug #10): scoped to the owning account.
     func fetchMessages(conversationId: String, ownerUserId: String) throws -> [Message] {
         try dbQueue.read { db in
             try Message
@@ -103,7 +117,6 @@ final class MessageRepository {
         }
     }
 
-    /// FIX (Bug #10): used by `deleteAccount` — the only path that destroys data.
     func deleteAll(ownerUserId: String) throws {
         try dbQueue.write { db in
             _ = try Message.filter(Column("ownerUserId") == ownerUserId).deleteAll(db)

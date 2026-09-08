@@ -1,9 +1,9 @@
 import Foundation
 import GRDB
 
-/// FIX (Bug #2): this repository is now the client's identity trust store, not just
-/// a contact cache. All identity writes go through the dedicated methods below so the
-/// pinning rules live in one place and can't be bypassed by a stray `upsert`.
+/// The client's identity trust store (Bug #2) and contact cache (Bug #11).
+/// All identity writes go through the dedicated methods below so the pinning rules
+/// live in one place and can't be bypassed by a stray `upsert`.
 final class UserRepository {
     private let dbQueue: DatabaseQueue
 
@@ -27,6 +27,42 @@ final class UserRepository {
         try dbQueue.read { db in try User.fetchAll(db) }
     }
 
+    // MARK: Contact caching (Bug #11)
+
+    /// FIX (Bug #11): records a display name for a peer we haven't pinned yet.
+    ///
+    /// Deliberately separate from `pinOrCompareIdentity`: knowing what to *call*
+    /// someone is not the same as trusting their keys, and conflating the two would
+    /// let a display-name refresh quietly overwrite pinned key material.
+    ///
+    /// `publicKey` is left empty here; the real key is written by the pinning path,
+    /// which is the only thing allowed to establish trust.
+    func upsertContactPlaceholder(userId: String, username: String) throws {
+        try dbQueue.write { db in
+            if var existing = try User.fetchOne(db, key: userId) {
+                guard existing.username != username else { return }
+                existing.username = username
+                try existing.update(db)
+            } else {
+                try User(
+                    id: userId,
+                    username: username,
+                    publicKey: Data(),
+                    createdAt: Date()
+                ).insert(db)
+            }
+        }
+    }
+
+    /// Refreshes only the display name, never touching key material.
+    func updateUsername(userId: String, username: String) throws {
+        try dbQueue.write { db in
+            guard var user = try User.fetchOne(db, key: userId), user.username != username else { return }
+            user.username = username
+            try user.update(db)
+        }
+    }
+
     // MARK: Identity pinning (Bug #2)
 
     enum IdentityCheck: Equatable {
@@ -41,8 +77,7 @@ final class UserRepository {
     }
 
     /// Compares a server-presented identity against the pinned one, pinning it on
-    /// first sight. Never overwrites a pinned key implicitly — that is what made a
-    /// bundle swap invisible before.
+    /// first sight. Never overwrites a pinned key implicitly.
     @discardableResult
     func pinOrCompareIdentity(
         userId: String,
@@ -65,6 +100,16 @@ final class UserRepository {
 
             if existing.identityChangedAt != nil {
                 return .changePending
+            }
+
+            // A placeholder row (Bug #11) has no pinned key yet, so this is still a
+            // first pin rather than a mismatch.
+            if existing.publicKey.isEmpty {
+                existing.publicKey = agreementKey
+                existing.identitySigningKey = signingKey
+                if let username { existing.username = username }
+                try existing.update(db)
+                return .pinned
             }
 
             let signingMatches = existing.identitySigningKey == nil || existing.identitySigningKey == signingKey

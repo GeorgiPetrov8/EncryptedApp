@@ -55,6 +55,18 @@ final class MockAPIClient: APIClientProtocol {
         return await store.envelopes(conversationId: conversationId)
     }
 
+    /// FIX (Bug #12)
+    func fetchPendingEnvelopes(userId: String, since cursor: Int) async throws -> PendingEnvelopesPage {
+        await simulateLatency()
+        return await store.pendingEnvelopes(userId: userId, since: cursor)
+    }
+
+    /// FIX (Bug #12)
+    func acknowledge(userId: String, envelopeIds: [String]) async throws {
+        guard !envelopeIds.isEmpty else { return }
+        await store.acknowledge(userId: userId, envelopeIds: envelopeIds)
+    }
+
     func uploadMedia(data: Data) async throws -> MediaUploadResult {
         await simulateLatency()
         let id = UUID().uuidString

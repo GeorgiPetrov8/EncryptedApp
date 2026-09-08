@@ -13,6 +13,10 @@ final class AuthService: ObservableObject {
     private let keychain = KeychainStore(service: "com.securechat.session")
     private let logger = Logger(subsystem: "com.securechat", category: "auth")
 
+    /// FIX (Bug #23): logout must clear cached attachments, otherwise one account's
+    /// media files stay on disk for whoever signs in next.
+    private var onLogout: (() -> Void)?
+
     private enum Keys {
         static let userId = "sessionUserId"
         static let username = "sessionUsername"
@@ -25,6 +29,12 @@ final class AuthService: ObservableObject {
         self.apiClient = apiClient
         self.userRepository = userRepository
         restoreSessionIfPossible()
+    }
+
+    /// Injected by `AppContainer` after construction, since the media service depends
+    /// on repositories that are built alongside this one.
+    func setLogoutHandler(_ handler: @escaping () -> Void) {
+        onLogout = handler
     }
 
     private func restoreSessionIfPossible() {
@@ -46,38 +56,23 @@ final class AuthService: ObservableObject {
     }
 
     /// Registers a brand-new account. Identity and prekeys are generated on this
-    /// device and only the public bundle is published.
-    ///
-    /// FIX (Bug #6): no password parameter.
-    ///
-    /// The previous signature took one, derived a PBKDF2 key from it, and threw the
-    /// result away with `_ =`. `login` ignored it entirely and `MockBackendStore`
-    /// resolved accounts by username alone — so the credential fields in the UI
-    /// promised a protection that did not exist anywhere in the codebase.
-    ///
-    /// Local secrecy is now enforced by the platform instead: the storage key is
-    /// stored under `.userPresence` access control (Face ID / Touch ID / passcode)
-    /// and `AppLockService` gates the UI. That is stronger than a user-chosen
-    /// password, cannot be forgotten, and adds no hand-rolled crypto.
+    /// device and only the public bundle is published (Bug #6: no password).
     func register(username: String) async throws {
         let userId = UUID().uuidString
 
-        // FIX (Bug #10): `force` is deliberately not set — generating over existing
-        // key material is what destroyed the first account's history.
-        let bundle = try cryptoService.generateIdentityAndBundle(userId: userId)
+        // FIX (Bug #11): the username is published as part of the bundle, so peers
+        // can resolve a display name from a user id alone.
+        let bundle = try cryptoService.generateIdentityAndBundle(userId: userId, username: username)
 
         let token: AuthToken
         do {
             token = try await apiClient.register(username: username, bundle: bundle)
         } catch {
-            // The account never came into existence server-side, so don't leave
-            // orphaned key material behind.
             cryptoService.deleteAccount(userId: userId)
             throw error
         }
 
-        // The server assigns the authoritative id; re-bind if it differs.
-        if token.userId != userId {
+        guard token.userId == userId else {
             logger.error("Server returned a different user id than requested")
             cryptoService.deleteAccount(userId: userId)
             throw AuthError.userIdMismatch
@@ -99,14 +94,7 @@ final class AuthService: ObservableObject {
         currentUsername = username
     }
 
-    /// FIX (Bug #10): the identity loaded is now the one belonging to the account
-    /// being signed into.
-    ///
-    /// The old implementation checked a *global* `hasIdentity` and then called
-    /// `loadIdentityFromKeychain()` with no account context. Registering as Alice,
-    /// logging out and logging in as Bob therefore loaded **Alice's** identity keys
-    /// under Bob's session — signing with her key and decrypting her sessions. That
-    /// is an identity compromise, not just the data loss the ticket described.
+    /// Loads the identity belonging to the account being signed into (Bug #10).
     func login(username: String) async throws {
         let token = try await apiClient.login(username: username)
 
@@ -127,10 +115,11 @@ final class AuthService: ObservableObject {
         currentUsername = username
     }
 
-    /// FIX (Bug #10): clears in-memory secrets and the session pointer, but never
-    /// deletes key material — logging out must not destroy history.
+    /// Clears in-memory secrets and the session pointer, but never deletes key
+    /// material — logging out must not destroy history (Bug #10).
     func logout() {
         cryptoService.deactivate()
+        onLogout?()
         currentUserId = nil
         currentUsername = nil
         keychain.delete(key: Keys.userId)

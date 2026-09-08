@@ -22,25 +22,19 @@ struct ConversationListView: View {
         NavigationStack {
             List {
                 if viewModel.summaries.isEmpty {
+                    // NOTE (Bug #19): `ContentUnavailableView` is iOS 17+, which is
+                    // now the deployment target — see project.yml.
                     ContentUnavailableView(
                         "No conversations yet",
                         systemImage: "bubble.left.and.bubble.right",
-                        description: Text("Tap + to start an encrypted conversation.")
+                        description: Text("Tap the compose button to start an encrypted conversation.")
                     )
                 }
                 ForEach(viewModel.summaries) { summary in
                     Button {
                         navigateToConversation = summary.conversation
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(summary.otherUsername)
-                                .font(.headline)
-                                .foregroundStyle(.primary)
-                            Text(summary.lastMessagePreview)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
+                        ConversationRow(summary: summary)
                     }
                 }
             }
@@ -52,6 +46,16 @@ struct ConversationListView: View {
                     } label: {
                         Image(systemName: "gearshape")
                     }
+                }
+                // FIX (Bug #25): visible connection state.
+                //
+                // When the listener failed to start there was no way to tell from the
+                // UI — the app looked normal and simply never received anything.
+                ToolbarItem(placement: .principal) {
+                    ConnectionIndicator(
+                        isListening: container.messagingService.isListening,
+                        isSyncing: container.messagingService.isSyncing
+                    )
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
@@ -70,8 +74,72 @@ struct ConversationListView: View {
                     navigateToConversation = conversation
                 })
             }
+            .refreshable {
+                // FIX (Bug #12): manual recovery path if the listener is wedged.
+                if let userId = container.authService.currentUserId {
+                    await container.messagingService.backfillPendingEnvelopes(myUserId: userId)
+                }
+                viewModel.reload()
+            }
             .onAppear { viewModel.reload() }
         }
+    }
+}
+
+private struct ConversationRow: View {
+    let summary: ConversationSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(summary.otherUsername)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                if summary.isVerified {
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                        .accessibilityLabel("Identity verified")
+                }
+                if summary.hasIdentityWarning {
+                    Image(systemName: "exclamationmark.shield.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("Security keys changed")
+                }
+                Spacer()
+                if let date = summary.lastActivityAt {
+                    Text(date, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(summary.lastMessagePreview)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct ConnectionIndicator: View {
+    let isListening: Bool
+    let isSyncing: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if isSyncing {
+                ProgressView().controlSize(.mini)
+                Text("Syncing…").font(.caption2)
+            } else if !isListening {
+                Image(systemName: "bolt.horizontal.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Text("Not connected").font(.caption2)
+            }
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
     }
 }
 

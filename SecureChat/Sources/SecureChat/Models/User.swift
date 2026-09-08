@@ -4,9 +4,9 @@ import GRDB
 /// A known user (self or a contact). `publicKey` is the raw X25519 identity
 /// agreement key — the *pinned* one, i.e. what we trust for this user.
 ///
-/// FIX (Bug #2): this row is now the client's trust store. On first handshake we
-/// pin the peer's identity (trust-on-first-use); on every later handshake we compare.
-/// A mismatch is never accepted silently — it is recorded in the `pending*` columns
+/// FIX (Bug #2): this row is the client's trust store. On first handshake we pin the
+/// peer's identity (trust-on-first-use); on every later handshake we compare. A
+/// mismatch is never accepted silently — it is recorded in the `pending*` columns
 /// and surfaced to the user, who must explicitly accept it.
 struct User: Codable, Identifiable, Equatable, FetchableRecord, PersistableRecord {
     static let databaseTableName = "users"
@@ -14,11 +14,16 @@ struct User: Codable, Identifiable, Equatable, FetchableRecord, PersistableRecor
     var id: String
     var username: String
     /// Pinned identity agreement key (X25519).
+    ///
+    /// FIX (Bug #11): may be empty for a contact placeholder — a row created just to
+    /// give a peer a display name before any key exchange has happened. Knowing what
+    /// to call someone is not the same as trusting their keys, so the two are stored
+    /// independently and only `pinOrCompareIdentity` may populate this.
     var publicKey: Data
     var createdAt: Date
 
     /// Pinned identity signing key (Ed25519). Optional only because rows written by
-    /// schema v1 predate it; new rows always carry it.
+    /// schema v1 predate it.
     var identitySigningKey: Data?
 
     /// Set once the user has compared safety numbers out of band and confirmed.
@@ -60,4 +65,7 @@ struct User: Codable, Identifiable, Equatable, FetchableRecord, PersistableRecor
     var hasUnacknowledgedIdentityChange: Bool {
         identityChangedAt != nil
     }
+
+    /// FIX (Bug #11): a placeholder has a name but no pinned key yet.
+    var isPlaceholderContact: Bool { publicKey.isEmpty }
 }

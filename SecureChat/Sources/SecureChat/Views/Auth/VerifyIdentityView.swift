@@ -1,13 +1,6 @@
 import SwiftUI
 
 /// FIX (Bug #2): the out-of-band verification surface the app was missing entirely.
-///
-/// Shows the safety number derived from both parties' long-term identity keys. If the
-/// two users read it to each other over a channel the server doesn't control and it
-/// matches, no machine-in-the-middle is present.
-///
-/// When the server has presented keys that differ from the pinned ones, this screen
-/// blocks on an explicit decision rather than letting the conversation continue.
 struct VerifyIdentityView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss

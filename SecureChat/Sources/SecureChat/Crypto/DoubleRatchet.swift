@@ -13,19 +13,6 @@ struct RatchetHeader: Codable, Equatable {
     static let aadByteCount = 40
 
     /// FIX (Bug #4): deterministic binary encoding instead of JSON.
-    ///
-    /// The previous implementation was `(try? JSONEncoder().encode(self)) ?? Data()`,
-    /// which had two defects: on an encoding failure it silently produced an *empty*
-    /// AAD (removing the header↔ciphertext binding rather than signalling), and
-    /// `JSONEncoder` gives no guarantee of stable key ordering across Swift versions —
-    /// a reordering between sender and receiver would break AEAD verification with no
-    /// diagnosable cause.
-    ///
-    /// This encoding is fixed-width and byte-exact: 32 raw key bytes, then the two
-    /// counters big-endian. It cannot fail and cannot be empty. `ratchetPublicKey` is
-    /// guaranteed to be 32 bytes because `RatchetMessage.deserialize` rejects anything
-    /// else before this is ever called on inbound data, and outbound headers always
-    /// carry our own `rawRepresentation`.
     func encodedForAAD() -> Data {
         var out = Data(capacity: Self.aadByteCount)
         out.append(ratchetPublicKey)
@@ -46,14 +33,24 @@ struct RatchetMessage: Codable, Equatable {
 
     static func deserialize(_ data: Data) throws -> RatchetMessage {
         let message = try JSONDecoder().decode(RatchetMessage.self, from: data)
-        // FIX (Bug #4/#5): validate at the trust boundary so the AAD encoding is
-        // always exactly `aadByteCount` bytes and the key is well-formed before any
-        // crypto touches it.
         guard message.header.ratchetPublicKey.count == 32 else {
             throw CryptoError.invalidKeyData
         }
         return message
     }
+}
+
+/// FIX (Bug #16): a buffered message key now carries its own metadata.
+///
+/// The old representation was a bare `[String: Data]`, which made both eviction
+/// policies below impossible to express: there was no way to know which entry was
+/// oldest, nor which ratchet generation it belonged to.
+struct SkippedMessageKey: Codable, Equatable {
+    let key: Data
+    let createdAt: Date
+    /// Monotonic counter of the receiving ratchet step this key was derived under.
+    /// Lets us drop whole generations at once when the ratchet has moved well past them.
+    let ratchetGeneration: UInt32
 }
 
 /// Persistable snapshot of a `DoubleRatchetSession`'s state, so a
@@ -69,7 +66,69 @@ struct RatchetSessionState: Codable {
     var sendMessageNumber: UInt32
     var receiveMessageNumber: UInt32
     var previousSendingChainLength: UInt32
-    var skippedMessageKeys: [String: Data] // key = "<ratchetPubKeyBase64>:<messageNumber>"
+    /// FIX (Bug #16): richer value type. Decoding tolerates the old `[String: Data]`
+    /// shape so existing persisted sessions survive the upgrade (see `init(from:)`).
+    var skippedMessageKeys: [String: SkippedMessageKey]
+    var ratchetGeneration: UInt32
+
+    init(
+        rootKey: Data,
+        sendingChainKey: Data?,
+        receivingChainKey: Data?,
+        sendingRatchetPrivateKey: Data,
+        receivingRatchetPublicKey: Data?,
+        sendMessageNumber: UInt32,
+        receiveMessageNumber: UInt32,
+        previousSendingChainLength: UInt32,
+        skippedMessageKeys: [String: SkippedMessageKey],
+        ratchetGeneration: UInt32
+    ) {
+        self.rootKey = rootKey
+        self.sendingChainKey = sendingChainKey
+        self.receivingChainKey = receivingChainKey
+        self.sendingRatchetPrivateKey = sendingRatchetPrivateKey
+        self.receivingRatchetPublicKey = receivingRatchetPublicKey
+        self.sendMessageNumber = sendMessageNumber
+        self.receiveMessageNumber = receiveMessageNumber
+        self.previousSendingChainLength = previousSendingChainLength
+        self.skippedMessageKeys = skippedMessageKeys
+        self.ratchetGeneration = ratchetGeneration
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case rootKey, sendingChainKey, receivingChainKey, sendingRatchetPrivateKey
+        case receivingRatchetPublicKey, sendMessageNumber, receiveMessageNumber
+        case previousSendingChainLength, skippedMessageKeys, ratchetGeneration
+    }
+
+    /// FIX (Bug #16): format migration.
+    ///
+    /// Sessions persisted before this change hold `[String: Data]`. Failing to decode
+    /// them would silently break every existing conversation, so the old shape is
+    /// accepted and upgraded in place — the recovered keys are simply stamped with the
+    /// current time and generation 0.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rootKey = try container.decode(Data.self, forKey: .rootKey)
+        sendingChainKey = try container.decodeIfPresent(Data.self, forKey: .sendingChainKey)
+        receivingChainKey = try container.decodeIfPresent(Data.self, forKey: .receivingChainKey)
+        sendingRatchetPrivateKey = try container.decode(Data.self, forKey: .sendingRatchetPrivateKey)
+        receivingRatchetPublicKey = try container.decodeIfPresent(Data.self, forKey: .receivingRatchetPublicKey)
+        sendMessageNumber = try container.decode(UInt32.self, forKey: .sendMessageNumber)
+        receiveMessageNumber = try container.decode(UInt32.self, forKey: .receiveMessageNumber)
+        previousSendingChainLength = try container.decode(UInt32.self, forKey: .previousSendingChainLength)
+        ratchetGeneration = try container.decodeIfPresent(UInt32.self, forKey: .ratchetGeneration) ?? 0
+
+        if let modern = try? container.decode([String: SkippedMessageKey].self, forKey: .skippedMessageKeys) {
+            skippedMessageKeys = modern
+        } else {
+            let legacy = try container.decode([String: Data].self, forKey: .skippedMessageKeys)
+            let now = Date()
+            skippedMessageKeys = legacy.mapValues {
+                SkippedMessageKey(key: $0, createdAt: now, ratchetGeneration: 0)
+            }
+        }
+    }
 }
 
 /// One party's view of an ongoing Double Ratchet session with a single peer.
@@ -84,16 +143,32 @@ final class DoubleRatchetSession {
     private var sendMessageNumber: UInt32 = 0
     private var receiveMessageNumber: UInt32 = 0
     private var previousSendingChainLength: UInt32 = 0
-    private var skippedMessageKeys: [String: SymmetricKey] = [:]
+    private var skippedMessageKeys: [String: SkippedMessageKey] = [:]
+    private var ratchetGeneration: UInt32 = 0
 
-    private let maxSkip = 1000 // cap on how many out-of-order messages we'll buffer keys for
+    /// Cap on how many out-of-order messages we'll buffer keys for in a single step.
+    private let maxSkip = 1000
+
+    // FIX (Bug #16): three bounds, because `maxSkip` alone bounded nothing.
+    //
+    // It limited one call to `skipReceivingKeys`, but the dictionary accumulated
+    // across the whole life of the session and entries were only ever removed when
+    // the corresponding message actually arrived. Messages that never arrive left
+    // keys behind forever — and this dictionary is serialized, encrypted and written
+    // to disk on *every* message, so the cost compounds. It's also a forward-secrecy
+    // problem: message keys are supposed to be short-lived.
+
+    /// Absolute ceiling on buffered keys; the oldest are evicted past this.
+    private static let maxStoredSkippedKeys = 2000
+    /// Buffered keys expire regardless of the ceiling.
+    private static let skippedKeyTTL: TimeInterval = 7 * 24 * 60 * 60 // 7 days
+    /// Keys from ratchet generations this far behind are dropped wholesale — the peer
+    /// has demonstrably moved on and those messages can no longer arrive in order.
+    private static let maxRatchetGenerationLag: UInt32 = 2
 
     // MARK: Construction
 
     /// Initiator (Alice) side: called right after `X3DH.initiate`.
-    ///
-    /// FIX (Bug #5): now `throws` — the DH step below can fail on a malformed peer key
-    /// and must not be forced.
     init(
         initiatorRootKey: SymmetricKey,
         peerSignedPreKeyPublic: Curve25519.KeyAgreement.PublicKey
@@ -132,9 +207,12 @@ final class DoubleRatchetSession {
         sendMessageNumber = state.sendMessageNumber
         receiveMessageNumber = state.receiveMessageNumber
         previousSendingChainLength = state.previousSendingChainLength
-        skippedMessageKeys = state.skippedMessageKeys.reduce(into: [:]) { result, entry in
-            result[entry.key] = SymmetricKey(data: entry.value)
-        }
+        skippedMessageKeys = state.skippedMessageKeys
+        ratchetGeneration = state.ratchetGeneration
+
+        // FIX (Bug #16): expire on load, so a session that sat idle past the TTL
+        // doesn't carry stale message keys back into memory.
+        pruneSkippedKeys()
     }
 
     func exportState() -> RatchetSessionState {
@@ -147,14 +225,15 @@ final class DoubleRatchetSession {
             sendMessageNumber: sendMessageNumber,
             receiveMessageNumber: receiveMessageNumber,
             previousSendingChainLength: previousSendingChainLength,
-            skippedMessageKeys: skippedMessageKeys.reduce(into: [:]) { result, entry in
-                result[entry.key] = entry.value.withUnsafeBytes { Data($0) }
-            }
+            skippedMessageKeys: skippedMessageKeys,
+            ratchetGeneration: ratchetGeneration
         )
     }
 
+    /// Diagnostic hook for tests and for bounding checks.
+    var bufferedSkippedKeyCount: Int { skippedMessageKeys.count }
+
     /// FIX (Bug #3): in-place rollback to a snapshot taken before a decrypt attempt.
-    /// Deliberately private — the only legitimate caller is `decrypt`'s failure path.
     private func restore(from state: RatchetSessionState) throws {
         rootKey = SymmetricKey(data: state.rootKey)
         sendingChainKey = state.sendingChainKey.map { SymmetricKey(data: $0) }
@@ -166,9 +245,8 @@ final class DoubleRatchetSession {
         sendMessageNumber = state.sendMessageNumber
         receiveMessageNumber = state.receiveMessageNumber
         previousSendingChainLength = state.previousSendingChainLength
-        skippedMessageKeys = state.skippedMessageKeys.reduce(into: [:]) { result, entry in
-            result[entry.key] = SymmetricKey(data: entry.value)
-        }
+        skippedMessageKeys = state.skippedMessageKeys
+        ratchetGeneration = state.ratchetGeneration
     }
 
     // MARK: Encrypt / decrypt
@@ -177,7 +255,15 @@ final class DoubleRatchetSession {
         if sendingChainKey == nil {
             // Bob's first reply: he only now generates his own ratchet step,
             // using whatever ratchet public key he last saw from Alice.
-            guard let peerKey = receivingRatchetPublicKey else { throw CryptoError.sessionNotReady }
+            //
+            // FIX (Bug #17): explicit, named guard. This is the one place a session
+            // can legitimately be "not ready" — the responder has a root key but has
+            // not yet seen the initiator's ratchet public key, so there is nothing to
+            // ratchet against. The generic throw made it indistinguishable from a
+            // corrupted session in the UI.
+            guard let peerKey = receivingRatchetPublicKey else {
+                throw CryptoError.awaitingFirstMessage
+            }
             try advanceSendingChain(against: peerKey)
         }
         guard let chainKey = sendingChainKey else { throw CryptoError.sessionNotReady }
@@ -196,24 +282,13 @@ final class DoubleRatchetSession {
         return RatchetMessage(header: header, ciphertext: ciphertext)
     }
 
-    /// FIX (Bug #3): decryption is now atomic.
-    ///
-    /// Previously the DH ratchet step, the skipped-key derivation, the chain-key
-    /// rotation and the receive counter were all committed *before* `AESGCM.open` ran.
-    /// A single forged envelope therefore advanced the ratchet irreversibly and
-    /// desynchronised the session permanently — a remote denial of service requiring
-    /// no key material at all.
-    ///
-    /// We now snapshot the full session state up front and roll back on *any* thrown
-    /// error, so a rejected message leaves the session exactly as it was.
+    /// FIX (Bug #3): decryption is atomic — a rejected message leaves the session
+    /// exactly as it was.
     func decrypt(_ message: RatchetMessage) throws -> Data {
         let snapshot = exportState()
         do {
             return try performDecrypt(message)
         } catch {
-            // Rollback must not mask the original error. `restore` can only fail if the
-            // snapshot itself were malformed, which cannot happen — it came from our own
-            // live state moments ago.
             try? restore(from: snapshot)
             throw error
         }
@@ -222,7 +297,6 @@ final class DoubleRatchetSession {
     private func performDecrypt(_ message: RatchetMessage) throws -> Data {
         let incomingKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: message.header.ratchetPublicKey)
 
-        // FIX (Bug #5): no more force-unwrap of `receivingRatchetPublicKey`.
         let isNewRatchetKey: Bool
         if let current = receivingRatchetPublicKey {
             isNewRatchetKey = current.rawRepresentation != incomingKey.rawRepresentation
@@ -242,7 +316,7 @@ final class DoubleRatchetSession {
         let messageKey: SymmetricKey
         let usedSkippedKey: Bool
         if let stored = skippedMessageKeys[skipId] {
-            messageKey = stored
+            messageKey = SymmetricKey(data: stored.key)
             usedSkippedKey = true
         } else {
             guard let chainKey = receivingChainKey else { throw CryptoError.sessionNotReady }
@@ -259,10 +333,7 @@ final class DoubleRatchetSession {
             associatedData: message.header.encodedForAAD()
         )
 
-        // Only consume the buffered key once the message has actually authenticated —
-        // otherwise a forged packet would burn the key for a legitimately delayed one.
-        // (The snapshot rollback in `decrypt` covers this too; this ordering makes the
-        // intent explicit rather than relying on it.)
+        // Only consume the buffered key once the message has actually authenticated.
         if usedSkippedKey {
             skippedMessageKeys.removeValue(forKey: skipId)
         }
@@ -287,24 +358,59 @@ final class DoubleRatchetSession {
         rootKey = newRoot
         receivingChainKey = newReceiveChain
         receiveMessageNumber = 0
+        ratchetGeneration &+= 1
         // Our next outgoing message will trigger a fresh sending ratchet
         // step lazily (see `encrypt`), keeping both sides in lockstep.
         sendingChainKey = nil
+
+        // FIX (Bug #16): the ratchet just moved forward, so older generations are
+        // now unreachable in practice — drop them rather than carrying them forever.
+        pruneSkippedKeys()
     }
 
     private func skipReceivingKeys(until target: UInt32) throws {
         guard receivingChainKey != nil else { return }
         guard target > receiveMessageNumber else { return }
-        guard target - receiveMessageNumber <= UInt32(maxSkip) else { throw CryptoError.sessionNotReady }
+        guard target - receiveMessageNumber <= UInt32(maxSkip) else { throw CryptoError.tooManySkippedMessages }
 
         while receiveMessageNumber < target {
             guard let chainKey = receivingChainKey, let peerKey = receivingRatchetPublicKey else { break }
             let (messageKey, nextChainKey) = Self.kdfChainKey(chainKey)
             let id = Self.skipId(ratchetKey: peerKey.rawRepresentation, messageNumber: receiveMessageNumber)
-            skippedMessageKeys[id] = messageKey
+            skippedMessageKeys[id] = SkippedMessageKey(
+                key: messageKey.withUnsafeBytes { Data($0) },
+                createdAt: Date(),
+                ratchetGeneration: ratchetGeneration
+            )
             receivingChainKey = nextChainKey
             receiveMessageNumber += 1
         }
+
+        pruneSkippedKeys()
+    }
+
+    /// FIX (Bug #16): the three eviction rules, applied together.
+    ///
+    /// Order matters: expire first (cheapest and most correct), then drop stale
+    /// generations, and only then fall back to evicting by age to satisfy the hard
+    /// ceiling. Without the ceiling a single peer could pin memory by sending a burst
+    /// of `previousChainLength` jumps.
+    private func pruneSkippedKeys() {
+        guard !skippedMessageKeys.isEmpty else { return }
+
+        let cutoff = Date().addingTimeInterval(-Self.skippedKeyTTL)
+        skippedMessageKeys = skippedMessageKeys.filter { $0.value.createdAt >= cutoff }
+
+        if ratchetGeneration > Self.maxRatchetGenerationLag {
+            let minimumGeneration = ratchetGeneration - Self.maxRatchetGenerationLag
+            skippedMessageKeys = skippedMessageKeys.filter { $0.value.ratchetGeneration >= minimumGeneration }
+        }
+
+        guard skippedMessageKeys.count > Self.maxStoredSkippedKeys else { return }
+        let survivors = skippedMessageKeys
+            .sorted { $0.value.createdAt > $1.value.createdAt }
+            .prefix(Self.maxStoredSkippedKeys)
+        skippedMessageKeys = Dictionary(uniqueKeysWithValues: survivors.map { ($0.key, $0.value) })
     }
 
     private static func skipId(ratchetKey: Data, messageNumber: UInt32) -> String {
@@ -313,10 +419,6 @@ final class DoubleRatchetSession {
 
     /// DH ratchet step: mix a fresh Diffie-Hellman output into the root key,
     /// producing a new root key plus a brand new chain key.
-    ///
-    /// FIX (Bug #5): was `try!`. The public key argument originates from
-    /// `RatchetHeader.ratchetPublicKey` — i.e. straight off the network — so a
-    /// malformed or hostile key crashed the entire app. Now it propagates.
     private static func dhRatchetStep(
         rootKey: SymmetricKey,
         privateKey: Curve25519.KeyAgreement.PrivateKey,
@@ -335,8 +437,7 @@ final class DoubleRatchetSession {
     }
 
     /// Symmetric-key ratchet step: derive this message's key and advance
-    /// the chain key, using two distinct HMAC "constants" as domain
-    /// separation (same trick Signal's spec uses).
+    /// the chain key, using two distinct HMAC "constants" as domain separation.
     private static func kdfChainKey(_ chainKey: SymmetricKey) -> (messageKey: SymmetricKey, nextChainKey: SymmetricKey) {
         let messageKeyMAC = HMAC<SHA256>.authenticationCode(for: Data([0x01]), using: chainKey)
         let nextChainMAC = HMAC<SHA256>.authenticationCode(for: Data([0x02]), using: chainKey)

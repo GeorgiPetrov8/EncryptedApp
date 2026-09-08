@@ -4,11 +4,10 @@ import CryptoKit
 /// Central point of contact for all cryptographic operations. Owns:
 ///  - the device's identity key + signed prekeys + one-time prekeys
 ///  - the device-local storage key (encrypts message history / session
-///    state / thumbnails at rest — distinct from the Double Ratchet keys,
-///    see the note on `Message.encryptedContent`)
+///    state / thumbnails at rest — distinct from the Double Ratchet keys)
 ///  - in-memory active `DoubleRatchetSession`s, keyed by peer user id
 ///
-/// FIX (Bug #10): the service is now bound to exactly one account at a time via
+/// FIX (Bug #10): the service is bound to exactly one account at a time via
 /// `activate(userId:)`. Every Keychain item is namespaced by that userId, so a
 /// second registration can no longer clobber the first account's storage key
 /// or identity.
@@ -20,10 +19,10 @@ final class CryptoService {
 
     private var activeSessions: [String: DoubleRatchetSession] = [:]
 
-    /// FIX (Bug #6/#10): cached in memory once unlocked. Two reasons:
-    /// the item is `.userPresence`-protected, so reading it triggers a biometric
-    /// prompt and must not happen per message; and `logout` needs a definite point
-    /// at which the key leaves memory.
+    /// FIX (Bug #6/#10): cached in memory once unlocked. The item is
+    /// `.userPresence`-protected, so reading it triggers a biometric prompt and must
+    /// not happen per message; and `logout` needs a definite point at which the key
+    /// leaves memory.
     private var cachedStorageKey: SymmetricKey?
 
     static let oneTimePreKeyBatchSize = 20
@@ -48,7 +47,6 @@ final class CryptoService {
 
     // MARK: Account binding (Bug #10)
 
-    /// Binds this service to an account. Must be called before any key access.
     func activate(userId: String) {
         if activeUserId != userId {
             deactivate()
@@ -71,7 +69,6 @@ final class CryptoService {
         return KeychainStore.namespaced(key, userId: userId)
     }
 
-    /// Whether key material exists for a specific account.
     /// FIX (Bug #10): takes an explicit userId. The old global `hasIdentity` let
     /// `AuthService.login` accept "some identity exists" as proof that *this*
     /// account's identity existed, so logging in as B could load A's keys.
@@ -89,10 +86,16 @@ final class CryptoService {
     /// Call once at registration. Generates and persists all key material to the
     /// Keychain and returns the public bundle to upload.
     ///
-    /// FIX (Bug #10): refuses to overwrite existing material unless `force` is set.
+    /// - Parameter username: FIX (Bug #11) — published alongside the keys so peers can
+    ///   resolve a display name from a user id alone. Without it the inbound path,
+    ///   which only ever sees a `senderId`, had no way to name the contact and every
+    ///   conversation rendered as "Unknown".
+    /// - Parameter force: FIX (Bug #10) — refuses to overwrite existing material
+    ///   unless explicitly requested.
     @discardableResult
     func generateIdentityAndBundle(
         userId: String,
+        username: String,
         oneTimePreKeyCount: Int = CryptoService.oneTimePreKeyBatchSize,
         force: Bool = false
     ) throws -> PreKeyBundleUpload {
@@ -105,8 +108,8 @@ final class CryptoService {
         try keychain.save(key: try account(Keys.identity), data: identity.rawRepresentation())
         self.identity = identity
 
-        // FIX (Bug #6): the storage key is now gated on user presence (Face ID /
-        // Touch ID / passcode) instead of a password that was derived and thrown away.
+        // FIX (Bug #6): the storage key is gated on user presence (Face ID / Touch ID
+        // / passcode) instead of a password that was derived and thrown away.
         let storageKey = AESGCM.randomKey()
         try keychain.save(
             key: try account(Keys.storageKey),
@@ -124,6 +127,7 @@ final class CryptoService {
 
         return PreKeyBundleUpload(
             userId: userId,
+            username: username,
             identityAgreementKey: identity.agreementPublicKey.rawRepresentation,
             identitySigningKey: identity.signingPublicKey.rawRepresentation,
             signedPreKeyId: spk.id,
@@ -142,8 +146,6 @@ final class CryptoService {
     }
 
     /// FIX (Bug #10): the only path that destroys data, and it is explicit.
-    /// Deletes every Keychain item in the account's namespace, including the
-    /// dynamically named `otk_*` and `signedPreKey_*` entries.
     func deleteAccount(userId: String) {
         keychain.deleteAll(forUserId: userId)
         if activeUserId == userId { deactivate() }
@@ -151,8 +153,6 @@ final class CryptoService {
 
     // MARK: Signed prekey rotation (Bug #7)
 
-    /// Rotates the signed prekey if it is older than `SignedPreKey.rotationInterval`.
-    /// Returns the new key when a rotation happened, `nil` otherwise.
     @discardableResult
     func rotateSignedPreKeyIfNeeded() throws -> SignedPreKey? {
         let current = try? loadCurrentSignedPreKey()
@@ -195,8 +195,7 @@ final class CryptoService {
     ///
     /// FIX (Bug #7): `MessagingService.handleIncoming` previously called
     /// `requireSignedPreKey()`, which returned whatever the *current* key happened
-    /// to be and ignored `handshake.usedSignedPreKeyId` entirely. Once rotation
-    /// exists, that mismatch silently derives the wrong root key.
+    /// to be and ignored `handshake.usedSignedPreKeyId` entirely.
     func signedPreKey(withId id: UInt32) throws -> SignedPreKey {
         guard let privateData = keychain.loadIfPresent(key: try account(Keys.signedPreKeyPrefix + String(id))),
               let signature = keychain.loadIfPresent(key: try account(Keys.signedPreKeySignaturePrefix + String(id))),
@@ -216,14 +215,13 @@ final class CryptoService {
         try signedPreKey(withId: try loadCurrentSignedPreKeyId())
     }
 
-    /// Deletes superseded signed prekeys once they are past the grace period.
-    /// The current key is never pruned regardless of age.
+    /// Deletes superseded signed prekeys once past the grace period. The current key
+    /// is never pruned regardless of age.
     private func pruneExpiredSignedPreKeys() throws {
         let currentId = try? loadCurrentSignedPreKeyId()
-        var liveIds = loadSignedPreKeyLiveIds()
         var survivors: [UInt32] = []
 
-        for id in liveIds {
+        for id in loadSignedPreKeyLiveIds() {
             if id == currentId {
                 survivors.append(id)
                 continue
@@ -238,8 +236,7 @@ final class CryptoService {
             }
         }
 
-        liveIds = survivors
-        try saveSignedPreKeyLiveIds(liveIds)
+        try saveSignedPreKeyLiveIds(survivors)
     }
 
     private func loadSignedPreKeyLiveIds() -> [UInt32] {
@@ -328,9 +325,13 @@ final class CryptoService {
 
     // MARK: Fixed-width encoding
 
-    /// Big-endian and explicitly sized. Avoids both endianness drift and the
-    /// unaligned `load(as:)` hazard the original code had when reading the
-    /// signed prekey id back from the Keychain.
+    /// FIX (Bug #20): big-endian and explicitly sized.
+    ///
+    /// The original read the signed prekey id back with
+    /// `spkIdData.withUnsafeBytes { $0.load(as: UInt32.self) }`. `Data` gives no
+    /// alignment guarantee and `load(as:)` requires one, so that was undefined
+    /// behaviour — and it was also host-endian, so the bytes weren't portable.
+    /// `loadUnaligned` plus an explicit byte order fixes both.
     private static func encode(_ value: UInt32) -> Data {
         withUnsafeBytes(of: value.bigEndian) { Data($0) }
     }
@@ -352,9 +353,9 @@ final class CryptoService {
 
     // MARK: Local storage (at-rest) encryption
 
-    /// FIX (Bug #6/#10): cached after first unlock. The Keychain item is
-    /// `.userPresence`-gated, so hitting it once per message (as the old
-    /// `loadStorageKey()` did, via `plaintext(for:)` in list rendering) would mean a
+    /// Cached after first unlock (Bugs #6, #10). The Keychain item is
+    /// `.userPresence`-gated, so hitting it once per message — as the old
+    /// `loadStorageKey()` did via `plaintext(for:)` in list rendering — would mean a
     /// biometric prompt per row.
     private func storageKey() throws -> SymmetricKey {
         if let cachedStorageKey { return cachedStorageKey }
@@ -364,8 +365,7 @@ final class CryptoService {
         return key
     }
 
-    /// Forces the biometric prompt up front (at login) rather than at the first
-    /// message render.
+    /// Forces the biometric prompt up front (at login) rather than at first render.
     func unlockStorageKey() throws {
         _ = try storageKey()
     }

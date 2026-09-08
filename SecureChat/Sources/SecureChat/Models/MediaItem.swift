@@ -15,7 +15,20 @@ struct MediaItem: Codable, Identifiable, Equatable, FetchableRecord, Persistable
     static let databaseTableName = "media"
 
     var id: String
+    /// FIX (Bug #13): always a real message id now.
+    ///
+    /// `MediaEncryptionService.prepareForSending` used to insert with `messageId: ""`
+    /// and a comment saying the caller would fill it in — nobody did. The column is
+    /// `NOT NULL` with a foreign key to `messages(id)`, so with GRDB's foreign keys
+    /// enabled the insert simply failed; without them it left an orphan row that
+    /// `fetch(messageId:)` could never find.
+    ///
+    /// The flow is now inverted: the message row is created first and its id is
+    /// passed in, so the media row always has a valid parent.
     var messageId: String
+    /// FIX (Bug #23): scopes cached files to an account so `deleteAccount` and
+    /// logout can clear exactly the right ones.
+    var ownerUserId: String
     var encryptedFilePath: String
     var encryptedThumbnail: Data?
     var fileSize: Int

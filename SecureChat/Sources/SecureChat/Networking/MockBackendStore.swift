@@ -5,10 +5,11 @@ import Foundation
 actor MockBackendStore {
     static let shared = MockBackendStore()
 
-    /// FIX (Bug #1): owns a mutable pool of one-time prekeys.
-    /// FIX (Bug #7): the signed prekey is mutable too, so rotation is visible to peers.
+    /// Owns a mutable pool of one-time prekeys (Bug #1) and a mutable signed
+    /// prekey so rotation is visible to peers (Bug #7).
     private struct StoredBundle {
         let userId: String
+        let username: String
         let identityAgreementKey: Data
         let identitySigningKey: Data
         var signedPreKeyId: UInt32
@@ -18,6 +19,7 @@ actor MockBackendStore {
 
         init(upload: PreKeyBundleUpload) {
             userId = upload.userId
+            username = upload.username
             identityAgreementKey = upload.identityAgreementKey
             identitySigningKey = upload.identitySigningKey
             signedPreKeyId = upload.signedPreKeyId
@@ -26,12 +28,11 @@ actor MockBackendStore {
             oneTimePreKeys = upload.oneTimePreKeys
         }
 
-        /// Pops one prekey and returns the bundle to hand out. An empty pool yields
-        /// `nil`, which both `X3DH.initiate` and `X3DH.respond` handle by skipping dh4.
         mutating func issue() -> PreKeyBundle {
             let otk = oneTimePreKeys.isEmpty ? nil : oneTimePreKeys.removeFirst()
             return PreKeyBundle(
                 userId: userId,
+                username: username,
                 identityAgreementKey: identityAgreementKey,
                 identitySigningKey: identitySigningKey,
                 signedPreKeyId: signedPreKeyId,
@@ -43,9 +44,20 @@ actor MockBackendStore {
         }
     }
 
+    /// FIX (Bug #12): the durable per-recipient queue that was missing.
+    ///
+    /// `sequence` is a server-assigned monotonic counter. Clients resume from it
+    /// rather than from `createdAt`, which is sender-supplied and can collide.
+    private struct QueuedEnvelope {
+        let sequence: Int
+        let envelope: EnvelopeDTO
+    }
+
     private var bundlesByUserId: [String: StoredBundle] = [:]
     private var userIdByUsername: [String: String] = [:]
     private var envelopesByConversation: [String: [EnvelopeDTO]] = [:]
+    private var pendingByRecipient: [String: [QueuedEnvelope]] = [:]
+    private var nextSequence = 1
     private var mediaBlobs: [String: Data] = [:]
     private var listeners: [String: AsyncStream<EnvelopeDTO>.Continuation] = [:]
 
@@ -68,9 +80,9 @@ actor MockBackendStore {
         bundlesByUserId[userId] = stored
     }
 
-    /// FIX (Bug #7): replaces the published signed prekey. Older ids are simply no
-    /// longer advertised — the *client* keeps their private halves through the grace
-    /// period so handshakes already in flight still resolve.
+    /// Replaces the published signed prekey (Bug #7). Older ids are no longer
+    /// advertised, but the *client* keeps their private halves through the grace
+    /// period so in-flight handshakes still resolve.
     func publishSignedPreKey(_ upload: SignedPreKeyUpload) throws {
         guard var stored = bundlesByUserId[upload.userId] else { throw APIError.userNotFound }
         stored.signedPreKeyId = upload.signedPreKeyId
@@ -100,6 +112,7 @@ actor MockBackendStore {
         guard let stored = bundlesByUserId[userId] else { throw APIError.userNotFound }
         let replacement = PreKeyBundleUpload(
             userId: stored.userId,
+            username: stored.username,
             identityAgreementKey: agreementKey,
             identitySigningKey: signingKey,
             signedPreKeyId: stored.signedPreKeyId,
@@ -110,13 +123,43 @@ actor MockBackendStore {
         bundlesByUserId[userId] = StoredBundle(upload: replacement)
     }
 
+    /// FIX (Bug #12): every envelope is queued durably *and* streamed.
+    ///
+    /// Previously the yield was the only delivery path, so anything sent while the
+    /// recipient wasn't subscribed vanished from their perspective.
     func send(_ envelope: EnvelopeDTO) {
         envelopesByConversation[envelope.conversationId, default: []].append(envelope)
+
+        let queued = QueuedEnvelope(sequence: nextSequence, envelope: envelope)
+        nextSequence += 1
+        pendingByRecipient[envelope.recipientId, default: []].append(queued)
+
         listeners[envelope.recipientId]?.yield(envelope)
     }
 
     func envelopes(conversationId: String) -> [EnvelopeDTO] {
         envelopesByConversation[conversationId] ?? []
+    }
+
+    /// FIX (Bug #12): ordered backfill from a cursor.
+    func pendingEnvelopes(userId: String, since cursor: Int) -> PendingEnvelopesPage {
+        let queue = (pendingByRecipient[userId] ?? []).filter { $0.sequence > cursor }
+        let ordered = queue.sorted { $0.sequence < $1.sequence }
+        return PendingEnvelopesPage(
+            envelopes: ordered.map(\.envelope),
+            cursor: ordered.last?.sequence ?? cursor
+        )
+    }
+
+    /// FIX (Bug #12): drops envelopes the client has durably stored.
+    func acknowledge(userId: String, envelopeIds: [String]) {
+        guard let queue = pendingByRecipient[userId] else { return }
+        let acknowledged = Set(envelopeIds)
+        pendingByRecipient[userId] = queue.filter { !acknowledged.contains($0.envelope.id) }
+    }
+
+    func pendingCount(userId: String) -> Int {
+        pendingByRecipient[userId]?.count ?? 0
     }
 
     func subscribe(userId: String) -> AsyncStream<EnvelopeDTO> {

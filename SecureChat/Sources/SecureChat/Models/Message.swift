@@ -31,8 +31,6 @@ enum DeliveryStatus: String, Codable, DatabaseValueConvertible {
 ///               plaintext -> local-storage AES-GCM key -> stored here.
 ///   - Incoming: wire ciphertext -> Double Ratchet decrypt -> plaintext ->
 ///               local-storage AES-GCM key -> stored here.
-/// `encryptedContent` is therefore encrypted at rest with the device-local
-/// storage key managed by `CryptoService`, not with any ratchet key.
 struct Message: Codable, Identifiable, Equatable, FetchableRecord, PersistableRecord {
     static let databaseTableName = "messages"
 
@@ -41,7 +39,7 @@ struct Message: Codable, Identifiable, Equatable, FetchableRecord, PersistableRe
     ///
     /// Namespacing the Keychain alone does not satisfy the acceptance criterion —
     /// without this column, a second account's `fetchMessages` would return the
-    /// first account's rows (and fail to decrypt them, since the storage keys now
+    /// first account's rows (and fail to decrypt them, since storage keys now
     /// differ per account).
     var ownerUserId: String
     var conversationId: String
@@ -54,4 +52,13 @@ struct Message: Codable, Identifiable, Equatable, FetchableRecord, PersistableRe
     /// True when this row is a placeholder standing in for an envelope that failed
     /// to decrypt, rather than real content.
     var isUndecryptable: Bool { deliveryStatus == .undecryptable }
+
+    /// FIX (Bug #18): media payloads must never be rendered as text.
+    ///
+    /// The body of a media message is a `MediaKeyPayload` JSON blob containing the
+    /// base64 per-file AES key. `ConversationListViewModel` stringified it directly
+    /// into the chat list.
+    var carriesMediaPayload: Bool {
+        contentType == .image || contentType == .video || contentType == .file
+    }
 }

@@ -52,24 +52,20 @@ final class ConversationListViewModel: ObservableObject {
             let conversations = try conversationRepository.fetchAllSortedByRecentActivity(ownerUserId: myUserId)
             summaries = try conversations.map { conversation in
                 let peerId = conversation.otherParticipant(myUserId: myUserId) ?? ""
-                let peer = try userRepository.fetch(id: peerId)
+                // FIX: contact lookups are scoped to the owning account now that
+                // `users` is keyed by `(ownerUserId, id)`.
+                let peer = peerId.isEmpty ? nil : try userRepository.fetch(ownerUserId: myUserId, id: peerId)
                 let last = try messageRepository.latestMessage(
                     conversationId: conversation.id,
                     ownerUserId: myUserId
                 )
 
-                // FIX (Bug #18): `previewText`, not `plaintext`.
-                //
-                // The old call rendered every message as text regardless of type, so a
-                // media message printed its raw `MediaKeyPayload` JSON — including the
-                // base64 per-file AES key — straight into the chat list, and from
-                // there into screenshots and the app-switcher snapshot.
+                // `previewText`, not `plaintext` — a media message's body is a
+                // key-bearing JSON payload and must never be rendered (Bug #18).
                 let preview = last.map { messagingService.previewText(for: $0) } ?? "No messages yet"
 
                 return ConversationSummary(
                     conversation: conversation,
-                    // FIX (Bug #11): a real name now, with a shortened id as the last
-                    // resort instead of a blanket "Unknown".
                     otherUsername: displayName(for: peer, peerId: peerId),
                     lastMessagePreview: preview,
                     lastActivityAt: last?.createdAt ?? conversation.lastMessageAt,
@@ -82,6 +78,7 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
+    /// A shortened id as the last resort rather than a blanket "Unknown" (Bug #11).
     private func displayName(for peer: User?, peerId: String) -> String {
         if let peer, !peer.username.isEmpty { return peer.username }
         guard !peerId.isEmpty else { return "Unknown contact" }

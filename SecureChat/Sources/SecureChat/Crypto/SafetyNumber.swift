@@ -9,8 +9,9 @@ import CryptoKit
 /// bundle passes that check trivially and reads the entire conversation.
 ///
 /// A safety number is derived from both parties' long-term identity keys. If the two
-/// users compare it out of band and it matches, no machine-in-the-middle is present.
-/// Order-independent by construction, so both sides display the same string.
+/// users compare it out of band (in person, over a phone call) and it matches, no
+/// machine-in-the-middle is present. Order-independent by construction, so both sides
+/// display the same string.
 enum SafetyNumber {
 
     /// Number of 5-digit groups shown to the user.
@@ -58,13 +59,15 @@ enum SafetyNumber {
             for byte in chunk {
                 value = (value << 8) | UInt64(byte)
             }
-            groups.append(String(format: "%0\(digitsPerGroup)d", value % 100_000))
+            let group = value % 100_000
+            groups.append(String(format: "%0\(digitsPerGroup)d", group))
         }
 
         return groups.joined(separator: " ")
     }
 
-    /// Short hex fingerprint, useful for logs and debugging.
+    /// Short hex fingerprint, useful for logs and debugging. Never shown as the
+    /// primary verification affordance — the digit groups are far easier to read aloud.
     static func shortFingerprint(agreementKey: Data, signingKey: Data) -> String {
         let digest = Data(SHA256.hash(data: identityBlob(agreementKey: agreementKey, signingKey: signingKey)))
         return digest.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")

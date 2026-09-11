@@ -1,5 +1,25 @@
 import Foundation
 
+/// A non-destructive directory record.
+///
+/// FIX: introduced so display-name lookups stop consuming key material.
+///
+/// `MessagingService.ensureContact` fell back to `fetchPreKeyBundle(forUserId:)` when
+/// it had a user id but no name. That endpoint pops a one-time prekey from the peer's
+/// pool on every call (`StoredBundle.issue()`), so a question as trivial as "what is
+/// this contact called?" burned a prekey reserved for an X3DH handshake — and with the
+/// pool drained, later handshakes silently fall back to the weaker no-dh4 path.
+///
+/// The identity keys are included because they're already public and it lets the
+/// caller pin through the normal path without a second round trip. No one-time prekey
+/// is ever returned here.
+struct DirectoryEntry: Codable, Equatable {
+    let userId: String
+    let username: String
+    let identityAgreementKey: Data
+    let identitySigningKey: Data
+}
+
 /// Abstraction over the backend REST API. `MockAPIClient` implements this
 /// against an in-memory store so the whole app runs without a real server.
 protocol APIClientProtocol {
@@ -13,23 +33,23 @@ protocol APIClientProtocol {
     /// Publishes a rotated signed prekey (Bug #7).
     func publishSignedPreKey(_ upload: SignedPreKeyUpload) async throws
 
-    /// Each call pops one prekey from the pool server-side (Bug #1).
+    /// FIX: read-only lookup that does **not** consume a one-time prekey.
+    /// Use this whenever you only need to identify a user, never `fetchPreKeyBundle`.
+    func fetchDirectoryEntry(userId: String) async throws -> DirectoryEntry
+    func fetchDirectoryEntry(username: String) async throws -> DirectoryEntry
+
+    /// Consumes a one-time prekey server-side (Bug #1). Only call when actually
+    /// establishing a session.
     func fetchPreKeyBundle(forUsername username: String) async throws -> PreKeyBundle
     func fetchPreKeyBundle(forUserId userId: String) async throws -> PreKeyBundle
 
     func sendMessage(_ envelope: EnvelopeDTO) async throws
     func fetchEnvelopes(conversationId: String) async throws -> [EnvelopeDTO]
 
-    /// FIX (Bug #12): everything addressed to this user since `cursor`.
-    ///
-    /// The old code only ever received through the live `AsyncStream`. If nobody was
-    /// listening, `MockBackendStore.send` yielded into the void — the envelope was
-    /// filed under `envelopesByConversation` but the recipient never learned of it.
-    /// `fetchEnvelopes(conversationId:)` existed but was never called, and it needs a
-    /// conversation id the recipient doesn't have yet for a brand-new chat.
+    /// Everything addressed to this user since `cursor` (Bug #12).
     func fetchPendingEnvelopes(userId: String, since cursor: Int) async throws -> PendingEnvelopesPage
 
-    /// FIX (Bug #12): lets the server drop envelopes we've durably stored.
+    /// Lets the server drop envelopes we've durably stored (Bug #12).
     func acknowledge(userId: String, envelopeIds: [String]) async throws
 
     func uploadMedia(data: Data) async throws -> MediaUploadResult

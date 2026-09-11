@@ -1,28 +1,35 @@
 import Foundation
 import GRDB
 
-/// Every read is scoped to the owning account (Bug #10).
+/// Every read and write is scoped to the owning account (Bug #10).
 final class ConversationRepository {
     private let dbQueue: DatabaseQueue
     init(dbQueue: DatabaseQueue) { self.dbQueue = dbQueue }
 
+    private static func key(ownerUserId: String, id: String) -> [String: DatabaseValueConvertible] {
+        ["ownerUserId": ownerUserId, "id": id]
+    }
+
+    /// FIX: safe now that the primary key is `(ownerUserId, id)`.
+    ///
+    /// `save(db)` resolves to an UPDATE on primary-key match. While the key was `id`
+    /// alone and Bug #14 made conversation ids identical across accounts, the
+    /// recipient's save matched the *sender's* row and rewrote its `ownerUserId` —
+    /// the conversation silently disappeared from the sender's list. The composite key
+    /// makes the two rows distinct, so this is an insert for each account as intended.
     func upsert(_ conversation: Conversation) throws {
         try dbQueue.write { db in try conversation.save(db) }
     }
 
     func fetch(id: String, ownerUserId: String) throws -> Conversation? {
         try dbQueue.read { db in
-            try Conversation
-                .filter(Column("ownerUserId") == ownerUserId)
-                .filter(Column("id") == id)
-                .fetchOne(db)
+            try Conversation.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: id))
         }
     }
 
     /// Finds an existing 1:1 conversation between the two users, if any.
     func findDirectConversation(ownerUserId: String, userA: String, userB: String) throws -> Conversation? {
-        // FIX (Bug #14): with deterministic ids this is a direct primary-key lookup,
-        // not a full scan with an in-memory set comparison.
+        // With deterministic ids this is a direct primary-key lookup (Bug #14).
         let deterministicId = Conversation.deterministicId(participantIds: [userA, userB])
         if let match = try fetch(id: deterministicId, ownerUserId: ownerUserId) {
             return match
@@ -38,15 +45,7 @@ final class ConversationRepository {
         }
     }
 
-    /// FIX (Bug #15): orders by actual last activity, as the name always claimed.
-    ///
-    /// The previous implementation was `order(Column("createdAt").desc)` — the
-    /// conversation's *creation* date. A chat that had just received a message stayed
-    /// wherever it was, so the list looked frozen.
-    ///
-    /// `lastMessageAt` is maintained on write, but the aggregate is still computed
-    /// here via a LEFT JOIN so that ordering stays correct even if a write path ever
-    /// forgets to update the denormalised column.
+    /// Orders by actual last activity, as the name always claimed (Bug #15).
     func fetchAllSortedByRecentActivity(ownerUserId: String) throws -> [Conversation] {
         try dbQueue.read { db in
             try Conversation.fetchAll(db, sql: """
@@ -64,7 +63,7 @@ final class ConversationRepository {
         }
     }
 
-    /// FIX (Bug #15): keeps the denormalised column in step with the messages table.
+    /// Keeps the denormalised column in step with the messages table (Bug #15).
     /// Only ever moves forward, so an out-of-order backfill can't drag a conversation
     /// back down the list.
     func touchLastMessageAt(conversationId: String, ownerUserId: String, date: Date) throws {

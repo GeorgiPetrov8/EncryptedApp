@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// FIX (Bug #2): the out-of-band verification surface the app was missing entirely.
+/// The out-of-band verification surface (Bug #2).
 struct VerifyIdentityView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
@@ -95,7 +95,10 @@ struct VerifyIdentityView: View {
 
     private func load() {
         do {
-            let peer = try container.userRepository.fetch(id: peerId)
+            // FIX: goes through `MessagingService.contact`, which scopes the lookup to
+            // the signed-in account. Reading `users` by id alone is ambiguous now that
+            // the table is keyed by `(ownerUserId, id)`.
+            let peer = try container.messagingService.contact(peerId)
             isVerified = peer?.isVerified ?? false
             identityChanged = peer?.hasUnacknowledgedIdentityChange ?? false
             safetyNumber = try container.messagingService.safetyNumber(forPeerId: peerId)

@@ -28,6 +28,7 @@ actor MockBackendStore {
             oneTimePreKeys = upload.oneTimePreKeys
         }
 
+        /// Consumes a one-time prekey. Only called from the bundle endpoints.
         mutating func issue() -> PreKeyBundle {
             let otk = oneTimePreKeys.isEmpty ? nil : oneTimePreKeys.removeFirst()
             return PreKeyBundle(
@@ -42,12 +43,21 @@ actor MockBackendStore {
                 oneTimePreKey: otk?.publicKey
             )
         }
+
+        /// FIX: the non-destructive projection. Public data only, no prekey consumed.
+        var directoryEntry: DirectoryEntry {
+            DirectoryEntry(
+                userId: userId,
+                username: username,
+                identityAgreementKey: identityAgreementKey,
+                identitySigningKey: identitySigningKey
+            )
+        }
     }
 
-    /// FIX (Bug #12): the durable per-recipient queue that was missing.
-    ///
-    /// `sequence` is a server-assigned monotonic counter. Clients resume from it
-    /// rather than from `createdAt`, which is sender-supplied and can collide.
+    /// The durable per-recipient queue (Bug #12). `sequence` is a server-assigned
+    /// monotonic counter; clients resume from it rather than from `createdAt`, which
+    /// is sender-supplied and can collide.
     private struct QueuedEnvelope {
         let sequence: Int
         let envelope: EnvelopeDTO
@@ -80,9 +90,7 @@ actor MockBackendStore {
         bundlesByUserId[userId] = stored
     }
 
-    /// Replaces the published signed prekey (Bug #7). Older ids are no longer
-    /// advertised, but the *client* keeps their private halves through the grace
-    /// period so in-flight handshakes still resolve.
+    /// Replaces the published signed prekey (Bug #7).
     func publishSignedPreKey(_ upload: SignedPreKeyUpload) throws {
         guard var stored = bundlesByUserId[upload.userId] else { throw APIError.userNotFound }
         stored.signedPreKeyId = upload.signedPreKeyId
@@ -94,6 +102,21 @@ actor MockBackendStore {
     func remainingOneTimePreKeyCount(userId: String) -> Int {
         bundlesByUserId[userId]?.oneTimePreKeys.count ?? 0
     }
+
+    // MARK: Directory (non-destructive)
+
+    /// FIX: identify a user without consuming a prekey.
+    func directoryEntry(forUserId userId: String) throws -> DirectoryEntry {
+        guard let stored = bundlesByUserId[userId] else { throw APIError.userNotFound }
+        return stored.directoryEntry
+    }
+
+    func directoryEntry(forUsername username: String) throws -> DirectoryEntry {
+        guard let userId = userIdByUsername[username] else { throw APIError.userNotFound }
+        return try directoryEntry(forUserId: userId)
+    }
+
+    // MARK: Bundles (consume a prekey)
 
     func bundle(forUsername username: String) throws -> PreKeyBundle {
         guard let userId = userIdByUsername[username] else { throw APIError.userNotFound }
@@ -123,10 +146,7 @@ actor MockBackendStore {
         bundlesByUserId[userId] = StoredBundle(upload: replacement)
     }
 
-    /// FIX (Bug #12): every envelope is queued durably *and* streamed.
-    ///
-    /// Previously the yield was the only delivery path, so anything sent while the
-    /// recipient wasn't subscribed vanished from their perspective.
+    /// Every envelope is queued durably *and* streamed (Bug #12).
     func send(_ envelope: EnvelopeDTO) {
         envelopesByConversation[envelope.conversationId, default: []].append(envelope)
 
@@ -141,7 +161,7 @@ actor MockBackendStore {
         envelopesByConversation[conversationId] ?? []
     }
 
-    /// FIX (Bug #12): ordered backfill from a cursor.
+    /// Ordered backfill from a cursor (Bug #12).
     func pendingEnvelopes(userId: String, since cursor: Int) -> PendingEnvelopesPage {
         let queue = (pendingByRecipient[userId] ?? []).filter { $0.sequence > cursor }
         let ordered = queue.sorted { $0.sequence < $1.sequence }
@@ -151,7 +171,7 @@ actor MockBackendStore {
         )
     }
 
-    /// FIX (Bug #12): drops envelopes the client has durably stored.
+    /// Drops envelopes the client has durably stored (Bug #12).
     func acknowledge(userId: String, envelopeIds: [String]) {
         guard let queue = pendingByRecipient[userId] else { return }
         let acknowledged = Set(envelopeIds)

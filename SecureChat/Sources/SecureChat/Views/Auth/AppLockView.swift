@@ -5,18 +5,13 @@ import LocalAuthentication
 ///
 /// This view carries more weight after Bug #6 than it did before. With the password
 /// removed, biometrics/passcode is the *only* thing standing between someone holding
-/// an unlocked device and the message history — so the failure paths here need to be
-/// honest rather than decorative.
+/// an unlocked device and the message history.
+///
+/// It also owns the biometric prompt while it is showing: `RootView` defers its
+/// `unlockStorage()` call so the two never compete for the sensor.
 struct AppLockView: View {
     @EnvironmentObject private var container: AppContainer
 
-    /// FIX: the original tracked a single `failedOnce` Bool, which conflated three
-    /// very different outcomes — the user cancelled, authentication genuinely failed,
-    /// and no biometrics/passcode is enrolled at all. The last case is the important
-    /// one: `AppLockService.unlock()` fails closed when
-    /// `canEvaluatePolicy` is false, so on such a device the old view showed
-    /// "Authentication failed. Try again." forever and the app was unusable with no
-    /// explanation and no way out.
     private enum LockState: Equatable {
         case idle
         case authenticating
@@ -59,16 +54,10 @@ struct AppLockView: View {
             .buttonStyle(.borderedProminent)
             .disabled(state == .authenticating)
 
-            // FIX: an escape hatch.
-            //
-            // Previously a device that couldn't evaluate the policy — no passcode set,
-            // biometrics locked out after repeated failures, a Simulator without
-            // enrolment — left the user permanently stuck on this screen with no way
-            // to reach Settings or switch accounts.
-            //
-            // Logging out is safe to expose here: it clears in-memory secrets and the
-            // session pointer but never deletes key material (Bug #10), so the history
-            // is still there after signing back in.
+            // An escape hatch: a device that can't evaluate the policy would otherwise
+            // strand the user here with no way to reach Settings or switch accounts.
+            // Safe to expose, because logout clears in-memory secrets but never
+            // deletes key material (Bug #10).
             if state == .failed || state == .unavailable || state == .cancelled {
                 Button("Log Out Instead") {
                     showLogoutConfirmation = true
@@ -81,8 +70,7 @@ struct AppLockView: View {
         .background(.background)
         .task {
             // Only prompt automatically on first appearance. Re-prompting after a
-            // cancel produces a loop the user can't break out of, because dismissing
-            // the system sheet re-triggers `.task` on some transitions.
+            // cancel produces a loop the user can't break out of.
             guard state == .idle else { return }
             await attemptUnlock()
         }
@@ -101,8 +89,8 @@ struct AppLockView: View {
     }
 
     private func attemptUnlock() async {
-        // FIX: distinguish "no biometrics enrolled" before attempting, so the user is
-        // told what's actually wrong instead of being shown a generic failure.
+        // Distinguish "no biometrics enrolled" before attempting, so the user is told
+        // what's actually wrong instead of a generic failure.
         guard Self.canAuthenticate() else {
             state = .unavailable
             return
@@ -110,14 +98,26 @@ struct AppLockView: View {
 
         state = .authenticating
         let success = await container.appLockService.unlock()
-        if success {
-            state = .idle
-        } else {
+        guard success else {
             // LAContext doesn't cleanly separate "cancelled" from "failed" through
             // `AppLockService`'s Bool return, so this is presented as the softer of
             // the two — a genuine mismatch simply gets retried.
             state = .cancelled
+            return
         }
+
+        state = .idle
+
+        // FIX: unlock the storage key here, sequentially, now that the screen is clear.
+        //
+        // `RootView.task` used to do this concurrently with the prompt above, so a cold
+        // launch with App Lock enabled fired two biometric requests at once. Doing it
+        // after a successful unlock means at most one sheet is ever on screen, and the
+        // storage key is ready before any message row renders.
+        //
+        // The device has just authenticated, so the `.userPresence` Keychain read
+        // typically resolves without a second prompt inside the system's grace window.
+        await container.authService.unlockStorage()
     }
 
     private static func canAuthenticate() -> Bool {

@@ -5,35 +5,48 @@ final class MessageRepository {
     private let dbQueue: DatabaseQueue
     init(dbQueue: DatabaseQueue) { self.dbQueue = dbQueue }
 
+    private static func key(ownerUserId: String, id: String) -> [String: DatabaseValueConvertible] {
+        ["ownerUserId": ownerUserId, "id": id]
+    }
+
     func insert(_ message: Message) throws {
         try dbQueue.write { db in try message.insert(db) }
     }
 
-    /// FIX (Bug #13): message and its media row in one transaction.
+    /// Message and its media row in one transaction (Bug #13).
     ///
-    /// The media table has a `NOT NULL` foreign key to `messages(id)`, so the message
-    /// must exist first. Doing the two inserts as separate `dbQueue.write` blocks
-    /// would allow a message with a dangling attachment (or an orphan media row) if
-    /// the process died in between.
-    ///
-    /// `media.messageId` is set here rather than trusted from the caller, so the two
-    /// rows can't disagree.
+    /// The media table has a composite foreign key to `messages(ownerUserId, id)`, so
+    /// the message must exist first. Doing the two inserts as separate `dbQueue.write`
+    /// blocks would allow a message with a dangling attachment, or an orphan media row,
+    /// if the process died in between.
     func insert(_ message: Message, media: MediaItem?) throws {
         try dbQueue.write { db in
             try message.insert(db)
-            if var media {
-                media.messageId = message.id
-                media.ownerUserId = message.ownerUserId
-                try media.insert(db)
-            }
+            try Self.insertMedia(db, media: media, message: message)
             try Self.touchConversation(db, message: message)
         }
     }
 
     /// Atomically stores an inbound message and marks its envelope processed (Bug #8).
+    ///
+    /// FIX: gained a `media` parameter.
+    ///
+    /// Without it the receiving side had no way to persist a `MediaItem` at all —
+    /// `MediaItem(...)` was constructed in exactly one place in the project,
+    /// `prepareForSending`, which only ever runs on the sender. A received photo
+    /// produced a `Message` row with `contentType: .image` and nothing else.
+    ///
+    /// Display still worked, because the per-file key travels inside the message
+    /// payload rather than through this table. What broke was ownership: the
+    /// recipient's cached blob was referenced by no row, so
+    /// `exclusivelyOwnedPaths` would report the sender as the only owner and delete
+    /// the shared file out from under the recipient — the precise scenario the
+    /// composite key was introduced to handle. A media gallery built on
+    /// `fetchAll(ownerUserId:)` would likewise have shown sent attachments only.
     @discardableResult
     func insertIfNotProcessed(
         _ message: Message,
+        media: MediaItem? = nil,
         envelopeId: String,
         recipientUserId: String,
         senderId: String
@@ -48,6 +61,7 @@ final class MessageRepository {
             guard !alreadyProcessed else { return false }
 
             try message.insert(db)
+            try Self.insertMedia(db, media: media, message: message)
             try ProcessedEnvelope(
                 recipientUserId: recipientUserId,
                 senderId: senderId,
@@ -59,8 +73,17 @@ final class MessageRepository {
         }
     }
 
-    /// FIX (Bug #15): maintains the denormalised ordering column in the same
-    /// transaction as the insert, so the list can never disagree with the history.
+    /// Binds a media row to its parent message. The ids are set here rather than
+    /// trusted from the caller, so the two rows cannot disagree.
+    private static func insertMedia(_ db: Database, media: MediaItem?, message: Message) throws {
+        guard var media else { return }
+        media.messageId = message.id
+        media.ownerUserId = message.ownerUserId
+        try media.insert(db)
+    }
+
+    /// Maintains the denormalised ordering column in the same transaction as the
+    /// insert, so the list can never disagree with the history (Bug #15).
     private static func touchConversation(_ db: Database, message: Message) throws {
         try db.execute(sql: """
             UPDATE conversations
@@ -88,9 +111,11 @@ final class MessageRepository {
         }
     }
 
-    func updateDeliveryStatus(messageId: String, status: DeliveryStatus) throws {
+    /// Scoped by owner: with ids shared across accounts, an update by `id` alone would
+    /// flip the delivery status on the other account's copy.
+    func updateDeliveryStatus(messageId: String, ownerUserId: String, status: DeliveryStatus) throws {
         try dbQueue.write { db in
-            if var message = try Message.fetchOne(db, key: messageId) {
+            if var message = try Message.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId)) {
                 message.deliveryStatus = status
                 try message.update(db)
             }

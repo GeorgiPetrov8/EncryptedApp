@@ -2,49 +2,71 @@ import Foundation
 import GRDB
 
 /// The client's identity trust store (Bug #2) and contact cache (Bug #11).
-/// All identity writes go through the dedicated methods below so the pinning rules
-/// live in one place and can't be bypassed by a stray `upsert`.
+///
+/// FIX: every method is now scoped to an owning account. With `users` keyed by
+/// `(ownerUserId, id)`, an unscoped lookup would be ambiguous and an unscoped write
+/// would silently clobber another account's pinned keys.
 final class UserRepository {
     private let dbQueue: DatabaseQueue
 
     init(dbQueue: DatabaseQueue) { self.dbQueue = dbQueue }
 
+    private static func key(ownerUserId: String, id: String) -> [String: DatabaseValueConvertible] {
+        ["ownerUserId": ownerUserId, "id": id]
+    }
+
     func upsert(_ user: User) throws {
         try dbQueue.write { db in try user.save(db) }
     }
 
-    func fetch(id: String) throws -> User? {
-        try dbQueue.read { db in try User.fetchOne(db, key: id) }
-    }
-
-    func fetch(username: String) throws -> User? {
+    func fetch(ownerUserId: String, id: String) throws -> User? {
         try dbQueue.read { db in
-            try User.filter(Column("username") == username).fetchOne(db)
+            try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: id))
         }
     }
 
-    func fetchAll() throws -> [User] {
-        try dbQueue.read { db in try User.fetchAll(db) }
+    func fetch(ownerUserId: String, username: String) throws -> User? {
+        try dbQueue.read { db in
+            try User
+                .filter(Column("ownerUserId") == ownerUserId)
+                .filter(Column("username") == username)
+                .fetchOne(db)
+        }
+    }
+
+    func fetchAll(ownerUserId: String) throws -> [User] {
+        try dbQueue.read { db in
+            try User.filter(Column("ownerUserId") == ownerUserId).fetchAll(db)
+        }
+    }
+
+    /// FIX: the missing half of account deletion.
+    ///
+    /// `AccountDeletionService` removed messages, conversations, sessions, media and
+    /// Keychain material, but never the `users` rows — so pinned identity keys and
+    /// usernames of a deleted account survived in the shared table indefinitely. With
+    /// `ownerUserId` in place this is finally expressible.
+    func deleteAll(ownerUserId: String) throws {
+        try dbQueue.write { db in
+            _ = try User.filter(Column("ownerUserId") == ownerUserId).deleteAll(db)
+        }
     }
 
     // MARK: Contact caching (Bug #11)
 
-    /// FIX (Bug #11): records a display name for a peer we haven't pinned yet.
+    /// Records a display name for a peer we haven't pinned yet.
     ///
     /// Deliberately separate from `pinOrCompareIdentity`: knowing what to *call*
-    /// someone is not the same as trusting their keys, and conflating the two would
-    /// let a display-name refresh quietly overwrite pinned key material.
-    ///
-    /// `publicKey` is left empty here; the real key is written by the pinning path,
-    /// which is the only thing allowed to establish trust.
-    func upsertContactPlaceholder(userId: String, username: String) throws {
+    /// someone is not the same as trusting their keys.
+    func upsertContactPlaceholder(ownerUserId: String, userId: String, username: String) throws {
         try dbQueue.write { db in
-            if var existing = try User.fetchOne(db, key: userId) {
+            if var existing = try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: userId)) {
                 guard existing.username != username else { return }
                 existing.username = username
                 try existing.update(db)
             } else {
                 try User(
+                    ownerUserId: ownerUserId,
                     id: userId,
                     username: username,
                     publicKey: Data(),
@@ -55,9 +77,10 @@ final class UserRepository {
     }
 
     /// Refreshes only the display name, never touching key material.
-    func updateUsername(userId: String, username: String) throws {
+    func updateUsername(ownerUserId: String, userId: String, username: String) throws {
         try dbQueue.write { db in
-            guard var user = try User.fetchOne(db, key: userId), user.username != username else { return }
+            guard var user = try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: userId)),
+                  user.username != username else { return }
             user.username = username
             try user.update(db)
         }
@@ -80,21 +103,22 @@ final class UserRepository {
     /// first sight. Never overwrites a pinned key implicitly.
     @discardableResult
     func pinOrCompareIdentity(
+        ownerUserId: String,
         userId: String,
         username: String?,
         agreementKey: Data,
         signingKey: Data
     ) throws -> IdentityCheck {
         try dbQueue.write { db in
-            guard var existing = try User.fetchOne(db, key: userId) else {
-                let user = User(
+            guard var existing = try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: userId)) else {
+                try User(
+                    ownerUserId: ownerUserId,
                     id: userId,
                     username: username ?? String(userId.prefix(8)),
                     publicKey: agreementKey,
                     createdAt: Date(),
                     identitySigningKey: signingKey
-                )
-                try user.insert(db)
+                ).insert(db)
                 return .pinned
             }
 
@@ -138,9 +162,9 @@ final class UserRepository {
 
     /// Promotes the pending identity to the pinned one. Only ever called from an
     /// explicit user action in `VerifyIdentityView`.
-    func acknowledgeIdentityChange(userId: String) throws {
+    func acknowledgeIdentityChange(ownerUserId: String, userId: String) throws {
         try dbQueue.write { db in
-            guard var user = try User.fetchOne(db, key: userId),
+            guard var user = try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: userId)),
                   let newAgreement = user.pendingIdentityAgreementKey else { return }
             user.publicKey = newAgreement
             user.identitySigningKey = user.pendingIdentitySigningKey
@@ -152,9 +176,9 @@ final class UserRepository {
         }
     }
 
-    func setVerified(_ verified: Bool, userId: String) throws {
+    func setVerified(_ verified: Bool, ownerUserId: String, userId: String) throws {
         try dbQueue.write { db in
-            guard var user = try User.fetchOne(db, key: userId) else { return }
+            guard var user = try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: userId)) else { return }
             user.isVerified = verified
             try user.update(db)
         }

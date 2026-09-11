@@ -35,6 +35,17 @@ final class MockAPIClient: APIClientProtocol {
         try await store.publishSignedPreKey(upload)
     }
 
+    /// FIX: read-only, consumes no prekey.
+    func fetchDirectoryEntry(userId: String) async throws -> DirectoryEntry {
+        await simulateLatency()
+        return try await store.directoryEntry(forUserId: userId)
+    }
+
+    func fetchDirectoryEntry(username: String) async throws -> DirectoryEntry {
+        await simulateLatency()
+        return try await store.directoryEntry(forUsername: username)
+    }
+
     func fetchPreKeyBundle(forUsername username: String) async throws -> PreKeyBundle {
         await simulateLatency()
         return try await store.bundle(forUsername: username)

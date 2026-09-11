@@ -1,16 +1,16 @@
 import Foundation
 import os
 
-/// FIX (Bug #23): a managed, protected, bounded store for encrypted media blobs.
-///
-/// The previous cache was a bare directory under `FileManager.temporaryDirectory`
-/// with three problems: no Data Protection class (the AES layer was the *only*
-/// protection, discarding the platform one for free), unbounded growth (nothing ever
-/// deleted a file), and unpredictable lifetime — the system may purge
-/// `temporaryDirectory` at an inconvenient moment, or never.
+/// A managed, protected, bounded store for encrypted media blobs (Bug #23).
 ///
 /// Files live in Application Support so their lifetime is ours to manage, carry the
 /// same protection class as the database, and are evicted by age and total size.
+///
+/// Note on layout: the directory is shared across local accounts and files are named
+/// by `mediaId`, which is a server-assigned global identifier. That's deliberate —
+/// two accounts that both cache the same blob should share one copy rather than
+/// duplicate it. It does mean removal has to be selective; see `remove(paths:)` and
+/// the note on `removeAll()`.
 final class MediaCacheStore {
     /// Files older than this are evicted regardless of the size budget.
     static let maxAge: TimeInterval = 30 * 24 * 60 * 60 // 30 days
@@ -83,17 +83,27 @@ final class MediaCacheStore {
         try? fileManager.removeItem(at: url)
     }
 
-    /// Used when a media row is deleted — the schema's cascade only removed the row,
-    /// leaving the blob orphaned on disk.
+    /// Unlinks specific files. The caller is responsible for having established that
+    /// no other account still references them.
     func remove(paths: [String]) {
         for path in paths {
             try? fileManager.removeItem(atPath: path)
         }
     }
 
-    /// Called on logout and account deletion so one account's attachments never
-    /// linger for the next signed-in account.
-    func removeAll() {
+    /// FIX: this is now the account-deletion path only, never logout.
+    ///
+    /// It used to be called from the logout handler with the comment "so the next
+    /// account on this device starts clean" — but the directory is shared, so Alice
+    /// logging out wiped Bob's cached attachments too. Bob wasn't logging out of
+    /// anything; his files just vanished and had to be re-downloaded. Not permanent
+    /// data loss, but it broke the account-isolation invariant the rest of the
+    /// codebase holds to, and cost needless network traffic.
+    ///
+    /// Selective eviction now lives in `MediaEncryptionService.clearCache(ownerUserId:)`.
+    /// Keep this for the case where wiping everything really is correct — a full
+    /// uninstall-style reset — and for tests.
+    func removeAllUnconditionally() {
         guard let dir = try? directory else { return }
         try? fileManager.removeItem(at: dir)
     }

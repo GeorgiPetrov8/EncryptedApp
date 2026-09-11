@@ -40,6 +40,20 @@ final class AppContainer: ObservableObject {
         self.sessionRepository = SessionRepository(dbQueue: database.dbQueue)
 
         self.authService = AuthService(cryptoService: cryptoService, apiClient: apiClient, userRepository: userRepository)
+
+        // FIX: built before `messagingService`, which now depends on it.
+        //
+        // The receive path needs to create the recipient's `MediaItem`, and there's no
+        // way to thread a service into `handleIncoming` — it's driven by a background
+        // stream, not by a caller. `MediaEncryptionService` depends only on the crypto
+        // service, the media repository and the API client, none of which reach back
+        // into messaging, so the ordering is the whole of the change.
+        self.mediaEncryptionService = MediaEncryptionService(
+            cryptoService: cryptoService,
+            mediaRepository: mediaRepository,
+            apiClient: apiClient
+        )
+
         self.messagingService = MessagingService(
             cryptoService: cryptoService,
             apiClient: apiClient,
@@ -48,44 +62,34 @@ final class AppContainer: ObservableObject {
             messageRepository: messageRepository,
             sessionRepository: sessionRepository,
             userRepository: userRepository,
+            mediaEncryptionService: mediaEncryptionService,
             authService: authService
         )
-        self.mediaEncryptionService = MediaEncryptionService(
-            cryptoService: cryptoService,
-            mediaRepository: mediaRepository,
-            apiClient: apiClient
-        )
+
         self.appLockService = AppLockService()
         self.accountDeletionService = AccountDeletionService(
             cryptoService: cryptoService,
             conversationRepository: conversationRepository,
             messageRepository: messageRepository,
             sessionRepository: sessionRepository,
+            userRepository: userRepository,
             mediaEncryptionService: mediaEncryptionService
         )
 
         // SwiftUI's @EnvironmentObject only reacts to the objectWillChange of the
         // object referenced directly by the property wrapper — not to nested
-        // ObservableObjects inside it. Forwarding these means every view can observe
-        // `container` and still react to service changes.
+        // ObservableObjects inside it.
         authService.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         messagingService.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         appLockService.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
 
-        // FIX (Bug #23): logging out must not leave the previous account's encrypted
-        // attachments on disk for whoever signs in next.
-        authService.setLogoutHandler { [weak self] in
+        // Evict only the departing account's cached media (Bug #23).
+        authService.setLogoutHandler { [weak self] departingUserId in
             self?.messagingService.stopListening()
-            self?.mediaEncryptionService.clearCache()
+            self?.mediaEncryptionService.clearCache(ownerUserId: departingUserId)
         }
 
-        // FIX (Bug #25): the listener follows the active account automatically.
-        //
-        // It used to be started by hand from three places (`AppContainer.init`,
-        // `AuthViewModel.login`, `AuthViewModel.register`). The `init` call in
-        // particular ran a `guard authService.currentUserId != nil` that could fire
-        // before session restore finished — the listener silently never started and
-        // the app looked healthy while receiving nothing.
+        // The listener follows the active account automatically (Bug #25).
         authService.$currentUserId
             .removeDuplicates()
             .sink { [weak self] userId in
@@ -99,7 +103,7 @@ final class AppContainer: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // FIX (Bug #23): trim the media cache once per launch.
+        // Trim the media cache once per launch (Bug #23).
         mediaEncryptionService.pruneCache()
     }
 

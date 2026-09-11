@@ -7,15 +7,23 @@ final class AuthService: ObservableObject {
     @Published private(set) var currentUserId: String?
     @Published private(set) var currentUsername: String?
 
+    /// Whether the at-rest key is available (see `unlockStorage()`).
+    @Published private(set) var isStorageUnlocked = false
+
     private let cryptoService: CryptoService
     private let apiClient: APIClientProtocol
     private let userRepository: UserRepository
     private let keychain = KeychainStore(service: "com.securechat.session")
     private let logger = Logger(subsystem: "com.securechat", category: "auth")
 
-    /// FIX (Bug #23): logout must clear cached attachments, otherwise one account's
-    /// media files stay on disk for whoever signs in next.
-    private var onLogout: (() -> Void)?
+    /// FIX: the handler now receives the account being logged out.
+    ///
+    /// It previously took no arguments and read `currentUserId` from the outside,
+    /// which only worked because `logout()` happened to clear that property *after*
+    /// invoking it — an ordering dependency with nothing enforcing it. Now that the
+    /// handler has to evict one specific account's media cache rather than wiping the
+    /// shared directory, passing the id explicitly removes the trap.
+    private var onLogout: ((String) -> Void)?
 
     private enum Keys {
         static let userId = "sessionUserId"
@@ -31,9 +39,7 @@ final class AuthService: ObservableObject {
         restoreSessionIfPossible()
     }
 
-    /// Injected by `AppContainer` after construction, since the media service depends
-    /// on repositories that are built alongside this one.
-    func setLogoutHandler(_ handler: @escaping () -> Void) {
+    func setLogoutHandler(_ handler: @escaping (String) -> Void) {
         onLogout = handler
     }
 
@@ -47,21 +53,43 @@ final class AuthService: ObservableObject {
         else { return }
 
         do {
+            // Identity keys are not user-presence gated, so this is safe in init.
+            // The storage key deliberately is not touched here — see `unlockStorage()`.
             try cryptoService.loadIdentityFromKeychain(userId: userId)
             currentUserId = userId
             currentUsername = username
+            isStorageUnlocked = false
         } catch {
             logger.error("Session restore failed; keeping the user signed out")
         }
     }
 
-    /// Registers a brand-new account. Identity and prekeys are generated on this
-    /// device and only the public bundle is published (Bug #6: no password).
+    /// Completes a restored session by unlocking the at-rest key.
+    ///
+    /// Can't live in `restoreSessionIfPossible`: that runs synchronously inside `init`,
+    /// during `AppContainer.bootstrap()`, so reading a `.userPresence`-gated Keychain
+    /// item there would block app launch on a biometric sheet.
+    ///
+    /// Idempotent, and safe to call from more than one place — `RootView` calls it on
+    /// cold launch, `AppLockView` calls it after a successful unlock. Callers must
+    /// still avoid racing it against another biometric prompt; see `RootView`.
+    @discardableResult
+    func unlockStorage() async -> Bool {
+        guard isAuthenticated, !isStorageUnlocked else { return isStorageUnlocked }
+        do {
+            try cryptoService.unlockStorageKey()
+            isStorageUnlocked = true
+            return true
+        } catch {
+            logger.error("Storage key unlock failed")
+            return false
+        }
+    }
+
+    /// Registers a brand-new account (Bug #6: no password).
     func register(username: String) async throws {
         let userId = UUID().uuidString
 
-        // FIX (Bug #11): the username is published as part of the bundle, so peers
-        // can resolve a display name from a user id alone.
         let bundle = try cryptoService.generateIdentityAndBundle(userId: userId, username: username)
 
         let token: AuthToken
@@ -78,7 +106,9 @@ final class AuthService: ObservableObject {
             throw AuthError.userIdMismatch
         }
 
+        // The self-row is owned by this account like any other contact.
         try userRepository.upsert(User(
+            ownerUserId: token.userId,
             id: token.userId,
             username: username,
             publicKey: bundle.identityAgreementKey,
@@ -92,6 +122,7 @@ final class AuthService: ObservableObject {
 
         currentUserId = token.userId
         currentUsername = username
+        isStorageUnlocked = true // generation just created and cached the key
     }
 
     /// Loads the identity belonging to the account being signed into (Bug #10).
@@ -99,8 +130,6 @@ final class AuthService: ObservableObject {
         let token = try await apiClient.login(username: username)
 
         guard cryptoService.hasIdentity(forUserId: token.userId) else {
-            // Keys live only on the device that registered them; this mock backend
-            // doesn't model multi-device restore.
             throw AuthError.noLocalIdentityForAccount
         }
 
@@ -113,15 +142,22 @@ final class AuthService: ObservableObject {
 
         currentUserId = token.userId
         currentUsername = username
+        isStorageUnlocked = true
     }
 
     /// Clears in-memory secrets and the session pointer, but never deletes key
     /// material — logging out must not destroy history (Bug #10).
     func logout() {
+        // Capture before clearing: the handler needs to know whose cache to evict.
+        let departingUserId = currentUserId
+
         cryptoService.deactivate()
-        onLogout?()
+        if let departingUserId {
+            onLogout?(departingUserId)
+        }
         currentUserId = nil
         currentUsername = nil
+        isStorageUnlocked = false
         keychain.delete(key: Keys.userId)
         keychain.delete(key: Keys.username)
     }

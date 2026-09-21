@@ -1,0 +1,33 @@
+# Replace with your real domain. Caddy will automatically obtain and renew
+# a Let's Encrypt certificate for it the first time it starts — no certbot,
+# no manual renewal cron job, no manual cert file management at all.
+chat.yourdomain.example {
+	# WebSocket upgrades (Connection: Upgrade / Upgrade: websocket) are
+	# proxied transparently by reverse_proxy without any special-casing —
+	# Caddy detects the upgrade and holds the connection open rather than
+	# treating it as a normal request/response.
+	reverse_proxy server:8080
+
+	# Sets X-Forwarded-For to the real client IP and strips any
+	# client-supplied copy of that header first — this is what makes it
+	# safe to set TRUST_PROXY=1 on the server (see src/rateLimit.js). If you
+	# put anything else in front of Caddy (another load balancer, a CDN),
+	# make sure *it* does the same thing, or the rate limiter ends up
+	# keying on the proxy's IP instead of each real client's.
+	header_up X-Forwarded-For {http.request.remote}
+
+	encode gzip
+
+	log {
+		output file /data/access.log
+	}
+}
+
+# Local testing without a real domain or DNS: `caddy run` will refuse to
+# request a certificate for "localhost", and instead serves plain HTTP.
+# Prefer just running the server directly for local dev (see the top of
+# docker-compose.yml) — this block exists mainly so `docker compose up`
+# doesn't require a domain to at least start.
+:80 {
+	reverse_proxy server:8080
+}

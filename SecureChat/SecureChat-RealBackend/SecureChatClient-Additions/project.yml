@@ -1,0 +1,100 @@
+name: SecureChat
+options:
+  bundleIdPrefix: com.securechat
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+  # FIX (real backend): per-configuration server address.
+  #
+  # Debug points at a server running on the same Mac as the simulator
+  # (127.0.0.1). Testing from a *physical* device requires your Mac's LAN
+  # IP instead (e.g. http://192.168.1.50:8080) since the device isn't the
+  # same machine as loopback — `NSAllowsLocalNetworking` below covers plain
+  # HTTP to either. Release should point at your real, TLS-terminated
+  # domain (see SecureChatServer/Caddyfile) once you have one; it's left as
+  # an obvious placeholder rather than a real host so a Release build never
+  # silently ships pointed at a dev machine.
+  configs:
+    Debug:
+      API_BASE_URL: "http://127.0.0.1:8080"
+      USE_MOCK_BACKEND: "NO"
+    Release:
+      API_BASE_URL: "https://chat.yourdomain.example"
+      USE_MOCK_BACKEND: "NO"
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift.git
+    from: 6.29.0
+targets:
+  SecureChat:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/SecureChat
+    dependencies:
+      - package: GRDB
+        product: GRDB
+    info:
+      path: Sources/SecureChat/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: "SecureChat needs camera access to capture photos and videos to send in encrypted messages."
+        NSPhotoLibraryUsageDescription: "SecureChat needs photo library access to attach images and videos to encrypted messages."
+        NSFaceIDUsageDescription: "SecureChat uses Face ID to protect access to your conversations."
+        # FIX (real backend): read by `NetworkConfiguration`. `$(...)` is
+        # substituted from the per-config settings above at build time.
+        API_BASE_URL: "$(API_BASE_URL)"
+        USE_MOCK_BACKEND: "$(USE_MOCK_BACKEND)"
+        # FIX (real backend): permits plain HTTP to local-network addresses
+        # only (loopback, private IP ranges, `.local` mDNS hosts) —
+        # `NSAllowsLocalNetworking` is the API Apple added specifically for
+        # "my dev server has no TLS cert yet." It does **not** weaken ATS
+        # against arbitrary internet hosts, so Release can safely keep this
+        # too; a Release build pointed at a real `https://` domain never
+        # exercises this exception at all.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.securechat.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        CODE_SIGN_ENTITLEMENTS: Sources/SecureChat/SecureChat.entitlements
+  SecureChatTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/SecureChatTests
+    dependencies:
+      - target: SecureChat
+schemes:
+  SecureChat:
+    build:
+      targets:
+        SecureChat: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SecureChatTests
+  # FIX (real backend): a second scheme, identical except for one Run-time
+  # environment variable, so switching to the mock backend for UI work or
+  # screenshots is "pick a different scheme in Xcode's toolbar" rather than
+  # an Info.plist edit + rebuild.
+  SecureChat-Mock:
+    build:
+      targets:
+        SecureChat: all
+    run:
+      config: Debug
+      environmentVariables:
+        USE_MOCK_BACKEND: "YES"
+    test:
+      config: Debug
+      targets:
+        - SecureChatTests

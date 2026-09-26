@@ -1,4 +1,6 @@
 import Foundation
+import SwiftUI
+import PhotosUI
 import Combine
 
 struct DisplayMessage: Identifiable {
@@ -30,6 +32,18 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var peerIsVerified = false
     @Published private(set) var peerIdentityChanged = false
 
+    @Published var selectedPhotoItem: PhotosPickerItem? {
+        didSet {
+            guard let item = selectedPhotoItem else { return }
+
+            Task {
+                await sendPhoto(item)
+            }
+        }
+    }
+
+    @Published private(set) var isSendingMedia = false
+    
     let conversation: Conversation
     private let messageRepository: MessageRepository
     private let messagingService: MessagingService
@@ -38,7 +52,8 @@ final class ChatViewModel: ObservableObject {
 
     /// Held so the retry button can resend exactly what failed.
     private var lastFailedDraft: String?
-
+    private var messagesById: [String: Message] = [:]
+    
     init(
         conversation: Conversation,
         messageRepository: MessageRepository,
@@ -93,6 +108,9 @@ final class ChatViewModel: ObservableObject {
                 conversationId: conversation.id,
                 ownerUserId: myUserId
             )
+            messagesById = Dictionary(
+                uniqueKeysWithValues: stored.map { ($0.id, $0) }
+            )
             messages = stored.map { message in
                 DisplayMessage(
                     id: message.id,
@@ -107,6 +125,18 @@ final class ChatViewModel: ObservableObject {
             }
         } catch {
             errorMessage = "Couldn't load messages: \(error.localizedDescription)"
+        }
+    }
+    
+    func loadMediaData(forMessageId messageId: String) async -> Data? {
+        guard let message = messagesById[messageId] else {
+            return nil
+        }
+
+        do {
+            return try await messagingService.mediaData(for: message)
+        } catch {
+            return nil
         }
     }
 
@@ -126,6 +156,42 @@ final class ChatViewModel: ObservableObject {
         guard let draft = lastFailedDraft else { return }
         draftText = draft
         await send()
+    }
+    
+    private func sendPhoto(_ item: PhotosPickerItem) async {
+        defer {
+            selectedPhotoItem = nil
+        }
+
+        guard !peerIdentityChanged else {
+            errorMessage = IdentityError
+                .identityChangeUnacknowledged(userId: peerId ?? "")
+                .localizedDescription
+            return
+        }
+
+        isSendingMedia = true
+        defer {
+            isSendingMedia = false
+        }
+
+        do {
+            let prepared = try await PhotoAttachmentLoader.loadAndPrepare(item)
+
+            try await messagingService.sendMedia(
+                rawData: prepared.imageData,
+                thumbnail: prepared.thumbnailData,
+                mediaType: .image,
+                in: conversation
+            )
+
+            reload()
+        } catch let identityError as IdentityError {
+            reloadPeer()
+            errorMessage = identityError.localizedDescription
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func send() async {

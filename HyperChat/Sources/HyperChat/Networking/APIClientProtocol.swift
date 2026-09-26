@@ -13,12 +13,12 @@ import Foundation
 /// The identity keys are included because they're already public and it lets the
 /// caller pin through the normal path without a second round trip. No one-time prekey
 /// is ever returned here.
-struct DirectoryEntry: Codable, Equatable {
-    let userId: String
-    let username: String
-    let identityAgreementKey: Data
-    let identitySigningKey: Data
-}
+//struct DirectoryEntry: Codable, Equatable {
+//    let userId: String
+//    let username: String
+//    let identityAgreementKey: Data
+//    let identitySigningKey: Data
+//}
 
 /// Abstraction over the backend REST API. `MockAPIClient` implements this
 /// against an in-memory store so the whole app runs without a real server.

@@ -19,11 +19,6 @@ struct SignedPreKeyUpload: Codable, Equatable {
 /// What the client uploads at registration (Bug #1).
 struct PreKeyBundleUpload: Codable, Equatable {
     let userId: String
-    /// FIX (Bug #11): the directory entry now carries the username.
-    ///
-    /// Without it the server had no way to answer "who is user X?", so
-    /// `resolveConversation` — which only ever sees a `senderId` — could not name
-    /// the peer and the whole list fell back to "Unknown".
     let username: String
     let identityAgreementKey: Data     // raw X25519 public key
     let identitySigningKey: Data       // raw Ed25519 public key
@@ -38,8 +33,6 @@ struct PreKeyBundleUpload: Codable, Equatable {
 /// server decrypt anything (zero-knowledge principle from the spec).
 struct PreKeyBundle: Codable, Equatable {
     let userId: String
-    /// FIX (Bug #11): carried through so both the outbound and inbound paths can
-    /// name the peer from a single fetch.
     let username: String
     let identityAgreementKey: Data
     let identitySigningKey: Data
@@ -50,19 +43,24 @@ struct PreKeyBundle: Codable, Equatable {
     let oneTimePreKey: Data?
 }
 
+/// The non-destructive directory lookup (Bug #11's fix) — never consumes a
+/// one-time prekey, unlike `PreKeyBundle`.
+struct DirectoryEntry: Codable, Equatable {
+    let userId: String
+    let username: String
+    let identityAgreementKey: Data
+    let identitySigningKey: Data
+}
+
 // MARK: - X3DH handshake payload
 
 /// Sent alongside the very first message in a new conversation so the
 /// responder can derive the same shared secret the initiator did.
 struct HandshakeInitPayload: Codable, Equatable {
     let identityAgreementKey: Data
-    /// The initiator's signing key, so the responder can pin the full identity (Bug #2).
     let identitySigningKey: Data
-    /// FIX (Bug #11): lets the responder name the initiator without a server round
-    /// trip, which matters because the responder may be offline-backfilling.
     let senderUsername: String?
     let ephemeralPublicKey: Data
-    /// The responder must resolve *this* id, not its current key (Bug #7).
     let usedSignedPreKeyId: UInt32
     let usedOneTimePreKeyId: UInt32?
 }
@@ -70,6 +68,65 @@ struct HandshakeInitPayload: Codable, Equatable {
 enum EnvelopeKind: String, Codable {
     case handshake
     case ratchet
+}
+
+/// What kind of plaintext an envelope's ciphertext decrypts to.
+///
+/// FIX (shared notepad): deliberately a **separate type** from
+/// `MessageContentType`, not an added case on it.
+///
+/// `MessageContentType` is also the type of `Message.contentType` — a
+/// column on rows that get rendered as chat bubbles, previewed in the
+/// conversation list, etc. A notepad sync operation never becomes a
+/// `Message` row at all (see `MessagingService.handleIncoming`'s early
+/// return for `.notePad`), so adding it to `MessageContentType` would mean
+/// every exhaustive `switch` over that type — the bubble icon, the preview
+/// text, media-detection helpers — gains a case that can never actually
+/// occur for a persisted message, purely defensive dead code with no way
+/// for the compiler to confirm it's really unreachable.
+///
+/// Keeping them separate makes the impossible state unrepresentable
+/// instead of merely unreached: `asMessageContentType` below is the only
+/// bridge between the two, and it's `nil` for exactly the one case
+/// (`.notePad`) that should never reach message-row construction.
+enum EnvelopePayloadKind: String, Codable, Equatable {
+    case text
+    case image
+    case video
+    case file
+    /// A `NotePadOperation`, JSON-encoded then Double-Ratchet-encrypted —
+    /// merged into the shared pad, never shown as a chat bubble.
+    case notePad
+
+    /// The corresponding `MessageContentType`, or `nil` for `.notePad`
+    /// (which has none — there is no chat-message representation of a
+    /// notepad sync).
+    var asMessageContentType: MessageContentType? {
+        switch self {
+        case .text: return .text
+        case .image: return .image
+        case .video: return .video
+        case .file: return .file
+        case .notePad: return nil
+        }
+    }
+}
+
+extension MessageContentType {
+    /// The inverse of `EnvelopePayloadKind.asMessageContentType`. Total —
+    /// every `MessageContentType` has a corresponding wire representation —
+    /// because only `.notePad` is one-directional, and that direction never
+    /// starts from a `MessageContentType` in the first place (nothing
+    /// constructs a `Message` to *become* a notepad sync; it's the other
+    /// way around, see `MessagingService.sendNotePadOperation`).
+    var asEnvelopePayloadKind: EnvelopePayloadKind {
+        switch self {
+        case .text: return .text
+        case .image: return .image
+        case .video: return .video
+        case .file: return .file
+        }
+    }
 }
 
 /// The only thing that ever crosses the network.
@@ -81,16 +138,16 @@ struct EnvelopeDTO: Codable, Equatable {
     let kind: EnvelopeKind
     let handshake: HandshakeInitPayload?
     let ratchetMessage: Data
-    let contentType: MessageContentType
+    /// FIX (shared notepad): was `MessageContentType`, now
+    /// `EnvelopePayloadKind` — see that type's doc comment for why.
+    /// Wire-compatible: both encode to the same four lowercase strings for
+    /// every case they share, and the server's `validate.js` allow-list
+    /// checks the raw string regardless of which Swift enum backs it.
+    let contentType: EnvelopePayloadKind
     let createdAt: Date
 }
 
-/// FIX (Bug #12): the result of a backfill sync.
-///
-/// `cursor` is the point to resume from next time. It is returned by the server
-/// rather than derived from `createdAt` on the client, because `createdAt` is
-/// sender-supplied and two envelopes can share a timestamp — resuming from a
-/// timestamp would either re-deliver or skip messages at the boundary.
+/// The result of a backfill sync.
 struct PendingEnvelopesPage: Codable, Equatable {
     let envelopes: [EnvelopeDTO]
     let cursor: Int

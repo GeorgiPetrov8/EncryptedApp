@@ -6,8 +6,6 @@ import os
 final class AuthService: ObservableObject {
     @Published private(set) var currentUserId: String?
     @Published private(set) var currentUsername: String?
-
-    /// Whether the at-rest key is available (see `unlockStorage()`).
     @Published private(set) var isStorageUnlocked = false
 
     private let cryptoService: CryptoService
@@ -16,13 +14,20 @@ final class AuthService: ObservableObject {
     private let keychain = KeychainStore(service: "com.HyperChat.session")
     private let logger = Logger(subsystem: "com.HyperChat", category: "auth")
 
-    /// FIX: the handler now receives the account being logged out.
+    /// FIX (real backend): the server-issued bearer token this account
+    /// authenticates with on every request after register/login.
     ///
-    /// It previously took no arguments and read `currentUserId` from the outside,
-    /// which only worked because `logout()` happened to clear that property *after*
-    /// invoking it — an ordering dependency with nothing enforcing it. Now that the
-    /// handler has to evict one specific account's media cache rather than wiping the
-    /// shared directory, passing the id explicitly removes the trap.
+    /// Every prior version of this file only ever used `token.userId` from
+    /// `AuthToken` and silently discarded `token.token` — harmless against
+    /// `MockBackendStore`, which never checked it, but a real server rejects
+    /// every request without a valid `Authorization: Bearer` header. Writes
+    /// go through `SessionTokenStore` rather than this file's own Keychain
+    /// instance so `RealAPIClient`/`RealWebSocketService` can read the
+    /// current token without depending on `AuthService` — see
+    /// `SessionTokenStore`'s own documentation for why that avoids a
+    /// construction-order dependency cycle in `AppContainer`.
+    private let tokenStore: SessionTokenStore
+
     private var onLogout: ((String) -> Void)?
 
     private enum Keys {
@@ -32,10 +37,16 @@ final class AuthService: ObservableObject {
 
     var isAuthenticated: Bool { currentUserId != nil }
 
-    init(cryptoService: CryptoService, apiClient: APIClientProtocol, userRepository: UserRepository) {
+    init(
+        cryptoService: CryptoService,
+        apiClient: APIClientProtocol,
+        userRepository: UserRepository,
+        tokenStore: SessionTokenStore
+    ) {
         self.cryptoService = cryptoService
         self.apiClient = apiClient
         self.userRepository = userRepository
+        self.tokenStore = tokenStore
         restoreSessionIfPossible()
     }
 
@@ -52,9 +63,18 @@ final class AuthService: ObservableObject {
             cryptoService.hasIdentity(forUserId: userId)
         else { return }
 
+        // FIX (real backend): a restored session with no stored bearer token
+        // can't make authenticated requests at all — this happens if the app
+        // was reinstalled (Keychain items can survive that on some
+        // configurations) or if a mock-backend build's session is restored
+        // against a real-backend build. Treat it as "not actually signed in"
+        // rather than presenting a UI that will fail on the first request.
+        guard tokenStore.currentToken != nil else {
+            logger.error("Session restore found identity but no session token; requiring re-login")
+            return
+        }
+
         do {
-            // Identity keys are not user-presence gated, so this is safe in init.
-            // The storage key deliberately is not touched here — see `unlockStorage()`.
             try cryptoService.loadIdentityFromKeychain(userId: userId)
             currentUserId = userId
             currentUsername = username
@@ -64,15 +84,6 @@ final class AuthService: ObservableObject {
         }
     }
 
-    /// Completes a restored session by unlocking the at-rest key.
-    ///
-    /// Can't live in `restoreSessionIfPossible`: that runs synchronously inside `init`,
-    /// during `AppContainer.bootstrap()`, so reading a `.userPresence`-gated Keychain
-    /// item there would block app launch on a biometric sheet.
-    ///
-    /// Idempotent, and safe to call from more than one place — `RootView` calls it on
-    /// cold launch, `AppLockView` calls it after a successful unlock. Callers must
-    /// still avoid racing it against another biometric prompt; see `RootView`.
     @discardableResult
     func unlockStorage() async -> Bool {
         guard isAuthenticated, !isStorageUnlocked else { return isStorageUnlocked }
@@ -106,7 +117,6 @@ final class AuthService: ObservableObject {
             throw AuthError.userIdMismatch
         }
 
-        // The self-row is owned by this account like any other contact.
         try userRepository.upsert(User(
             ownerUserId: token.userId,
             id: token.userId,
@@ -114,15 +124,19 @@ final class AuthService: ObservableObject {
             publicKey: bundle.identityAgreementKey,
             createdAt: Date(),
             identitySigningKey: bundle.identitySigningKey,
-            isVerified: true // our own identity is trivially "verified"
+            isVerified: true
         ))
 
         try keychain.save(key: Keys.userId, data: Data(token.userId.utf8))
         try keychain.save(key: Keys.username, data: Data(username.utf8))
+        // FIX (real backend): persist the bearer token alongside the
+        // session pointer. Without this line the account could register
+        // successfully and then fail the very next network call.
+        try tokenStore.save(token.token)
 
         currentUserId = token.userId
         currentUsername = username
-        isStorageUnlocked = true // generation just created and cached the key
+        isStorageUnlocked = true
     }
 
     /// Loads the identity belonging to the account being signed into (Bug #10).
@@ -134,21 +148,23 @@ final class AuthService: ObservableObject {
         }
 
         try cryptoService.loadIdentityFromKeychain(userId: token.userId)
-        // Surface the biometric prompt here rather than at the first message render.
         try cryptoService.unlockStorageKey()
 
         try keychain.save(key: Keys.userId, data: Data(token.userId.utf8))
         try keychain.save(key: Keys.username, data: Data(username.utf8))
+        // FIX (real backend): a fresh login issues a fresh server-side
+        // session (see `auth.js`'s `issueToken` — the old one, if any, is
+        // simply superseded rather than explicitly revoked).
+        try tokenStore.save(token.token)
 
         currentUserId = token.userId
         currentUsername = username
         isStorageUnlocked = true
     }
 
-    /// Clears in-memory secrets and the session pointer, but never deletes key
-    /// material — logging out must not destroy history (Bug #10).
+    /// Clears in-memory secrets, the session pointer, and the bearer token —
+    /// but never deletes key material (Bug #10: logout must not destroy history).
     func logout() {
-        // Capture before clearing: the handler needs to know whose cache to evict.
         let departingUserId = currentUserId
 
         cryptoService.deactivate()
@@ -160,6 +176,14 @@ final class AuthService: ObservableObject {
         isStorageUnlocked = false
         keychain.delete(key: Keys.userId)
         keychain.delete(key: Keys.username)
+        // FIX (real backend): without this, the token for the account that
+        // just logged out remains in the Keychain and — because
+        // `SessionTokenStore` is keyed by Keychain service, not by user —
+        // would be picked up and sent as the *next* signed-in account's
+        // bearer token. The server would (correctly) reject it as belonging
+        // to someone else's session, surfacing as a confusing 401/403 on
+        // the very first request after switching accounts on one device.
+        tokenStore.clear()
     }
 }
 

@@ -1,23 +1,19 @@
 name: HyperChat
 options:
   bundleIdPrefix: com.HyperChat
-  # FIX (Bug #19), Variant A: raised from 16.0.
-  #
-  # `ConversationListView` uses `ContentUnavailableView` and
-  # `.navigationDestination(item:)`, both iOS 17+, so the project could not compile
-  # against a 16.0 target — the README's admission that it had never been built.
-  #
-  # Raising the target is preferable to rewriting those call sites: the iOS 16
-  # workarounds (a hand-rolled empty state, and `navigationDestination(isPresented:)`
-  # with a parallel `@State`) are strictly more code for a scaffold with no installed
-  # base to preserve. It also lets the deprecated one-parameter `onChange` calls move
-  # to the two-parameter form (Bug #26) without availability branching.
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
 settings:
   base:
     SWIFT_VERSION: "5.9"
+  configs:
+    Debug:
+      API_BASE_URL: "http://127.0.0.1:8080"
+      USE_MOCK_BACKEND: "NO"
+    Release:
+      API_BASE_URL: "https://chat.yourdomain.example"
+      USE_MOCK_BACKEND: "NO"
 packages:
   GRDB:
     url: https://github.com/groue/GRDB.swift.git
@@ -40,12 +36,30 @@ targets:
         NSCameraUsageDescription: "HyperChat needs camera access to capture photos and videos to send in encrypted messages."
         NSPhotoLibraryUsageDescription: "HyperChat needs photo library access to attach images and videos to encrypted messages."
         NSFaceIDUsageDescription: "HyperChat uses Face ID to protect access to your conversations."
+        API_BASE_URL: "$(API_BASE_URL)"
+        USE_MOCK_BACKEND: "$(USE_MOCK_BACKEND)"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # FIX (alarm): keeps the alarm sound playing when the app is
+        # backgrounded mid-challenge.
+        #
+        # Without this, swiping up to the home screen silences the alarm
+        # instantly — a bypass requiring no thought at all, which would make
+        # the whole "can't dismiss without solving something" premise
+        # decorative. With it, the audio session survives backgrounding and
+        # the user has to come back and finish.
+        #
+        # Note for App Review: this is a legitimate use of the audio
+        # background mode (an alarm clock is one of Apple's own listed
+        # examples), but be ready to explain it — background audio is
+        # scrutinised, and "it's an alarm" needs to be evident from the UI,
+        # which `AlarmRingingView` makes it.
+        UIBackgroundModes:
+          - audio
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.HyperChat.app
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
-        # Required for the NSFileProtectionCompleteUntilFirstUserAuthentication
-        # attribute on the database and media cache to take effect (Bugs #22, #23).
         CODE_SIGN_ENTITLEMENTS: Sources/HyperChat/HyperChat.entitlements
   HyperChatTests:
     type: bundle.unit-test
@@ -61,6 +75,18 @@ schemes:
         HyperChat: all
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - HyperChatTests
+  HyperChat-Mock:
+    build:
+      targets:
+        HyperChat: all
+    run:
+      config: Debug
+      environmentVariables:
+        USE_MOCK_BACKEND: "YES"
     test:
       config: Debug
       targets:

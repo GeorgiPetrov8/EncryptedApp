@@ -12,10 +12,26 @@ struct SettingsView: View {
                     LabeledContent("Username", value: username)
                 }
                 Button("Log Out") {
-                    // The listener stop and media-cache clear happen in the logout
-                    // handler wired up by AppContainer (Bugs #23, #25).
                     container.authService.logout()
                 }
+            }
+
+            // FIX (alarm): entry point to the alarm list.
+            Section {
+                NavigationLink {
+                    AlarmListView()
+                } label: {
+                    HStack {
+                        Label("Alarms", systemImage: "alarm.fill")
+                        Spacer()
+                        if container.alarmService.enabledCount > 0 {
+                            Text("\(container.alarmService.enabledCount) on")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } footer: {
+                Text("Alarms that won't switch off until you've solved a few problems — or messaged someone a word, so they know you're up.")
             }
 
             Section {
@@ -24,8 +40,6 @@ struct SettingsView: View {
                         .foregroundStyle(container.messagingService.isListening ? .green : .orange)
                 }
                 if !container.messagingService.isListening {
-                    // FIX (Bug #25): a manual recovery path, now that the state is
-                    // actually observable.
                     Button("Reconnect") {
                         container.messagingService.startListening()
                     }
@@ -54,12 +68,9 @@ struct SettingsView: View {
             } header: {
                 Text("App Lock")
             } footer: {
-                // FIX (Bug #6): with the password removed, this is the honest
-                // description of what actually protects local data.
                 Text("HyperChat has no password. Your message history is encrypted with a key held in this device's Keychain and released only after you authenticate. The conversation is also hidden in the app switcher.")
             }
 
-            // Deletion is explicit, isolated, and clearly labelled (Bug #10).
             Section {
                 Button("Delete Account and All Data", role: .destructive) {
                     showDeleteConfirmation = true
@@ -67,7 +78,7 @@ struct SettingsView: View {
             } header: {
                 Text("Danger Zone")
             } footer: {
-                Text("Permanently removes this account's keys, conversations, messages, and cached attachments from this device. This cannot be undone.")
+                Text("Permanently removes this account's keys, conversations, messages, shared pads, alarms, and cached attachments from this device. This cannot be undone.")
             }
 
             if let errorMessage {
@@ -77,7 +88,7 @@ struct SettingsView: View {
             }
 
             Section {
-                Text("This is a scaffold build. Media auto-delete timers, disappearing messages, and group chats aren't wired into the UI yet.")
+                Text("This is a scaffold build. Disappearing messages and group chats aren't wired into the UI yet.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } header: {
@@ -101,6 +112,7 @@ struct SettingsView: View {
         guard let userId = container.authService.currentUserId else { return }
         do {
             container.messagingService.stopListening()
+            container.alarmService.stopForLogout()
             try container.accountDeletionService.deleteAccount(userId: userId)
             container.authService.logout()
         } catch {

@@ -14,11 +14,6 @@ final class MessageRepository {
     }
 
     /// Message and its media row in one transaction (Bug #13).
-    ///
-    /// The media table has a composite foreign key to `messages(ownerUserId, id)`, so
-    /// the message must exist first. Doing the two inserts as separate `dbQueue.write`
-    /// blocks would allow a message with a dangling attachment, or an orphan media row,
-    /// if the process died in between.
     func insert(_ message: Message, media: MediaItem?) throws {
         try dbQueue.write { db in
             try message.insert(db)
@@ -28,21 +23,6 @@ final class MessageRepository {
     }
 
     /// Atomically stores an inbound message and marks its envelope processed (Bug #8).
-    ///
-    /// FIX: gained a `media` parameter.
-    ///
-    /// Without it the receiving side had no way to persist a `MediaItem` at all —
-    /// `MediaItem(...)` was constructed in exactly one place in the project,
-    /// `prepareForSending`, which only ever runs on the sender. A received photo
-    /// produced a `Message` row with `contentType: .image` and nothing else.
-    ///
-    /// Display still worked, because the per-file key travels inside the message
-    /// payload rather than through this table. What broke was ownership: the
-    /// recipient's cached blob was referenced by no row, so
-    /// `exclusivelyOwnedPaths` would report the sender as the only owner and delete
-    /// the shared file out from under the recipient — the precise scenario the
-    /// composite key was introduced to handle. A media gallery built on
-    /// `fetchAll(ownerUserId:)` would likewise have shown sent attachments only.
     @discardableResult
     func insertIfNotProcessed(
         _ message: Message,
@@ -73,8 +53,46 @@ final class MessageRepository {
         }
     }
 
-    /// Binds a media row to its parent message. The ids are set here rather than
-    /// trusted from the caller, so the two rows cannot disagree.
+    /// FIX (shared notepad): marks an envelope processed **without**
+    /// inserting a `Message` row.
+    ///
+    /// A `.notePad` envelope's replay protection needs the exact same
+    /// `processed_envelopes` dedup that chat messages already get (Bug #8) —
+    /// the offline backfill queue and the live WebSocket stream can both
+    /// redeliver the same envelope, and without this check a resent notepad
+    /// op would simply re-merge harmlessly (the CRDT is idempotent) but
+    /// still cost a wasted write and a spurious UI refresh on every replay.
+    /// What it must *not* do is create a `Message` row: a notepad sync was
+    /// never a chat message, and inserting one would put a phantom bubble
+    /// in the conversation timeline with no corresponding user-visible
+    /// content.
+    ///
+    /// Returns whether this call actually recorded the envelope as newly
+    /// processed (`false` if it had already been seen) — `MessagingService`
+    /// uses this the same way `insertIfNotProcessed`'s return value is
+    /// used, to decide whether to publish a UI-refresh notification.
+    @discardableResult
+    func markEnvelopeProcessed(envelopeId: String, recipientUserId: String, senderId: String) throws -> Bool {
+        try dbQueue.write { db in
+            let alreadyProcessed = try ProcessedEnvelope
+                .filter(Column("recipientUserId") == recipientUserId)
+                .filter(Column("senderId") == senderId)
+                .filter(Column("envelopeId") == envelopeId)
+                .fetchCount(db) > 0
+            guard !alreadyProcessed else { return false }
+
+            try ProcessedEnvelope(
+                recipientUserId: recipientUserId,
+                senderId: senderId,
+                envelopeId: envelopeId,
+                receivedAt: Date()
+            ).insert(db)
+            return true
+        }
+    }
+
+    /// Binds a media row to its parent message. The ids are set here rather
+    /// than trusted from the caller, so the two rows cannot disagree.
     private static func insertMedia(_ db: Database, media: MediaItem?, message: Message) throws {
         guard var media else { return }
         media.messageId = message.id
@@ -82,8 +100,8 @@ final class MessageRepository {
         try media.insert(db)
     }
 
-    /// Maintains the denormalised ordering column in the same transaction as the
-    /// insert, so the list can never disagree with the history (Bug #15).
+    /// Maintains the denormalised ordering column in the same transaction as
+    /// the insert, so the list can never disagree with the history (Bug #15).
     private static func touchConversation(_ db: Database, message: Message) throws {
         try db.execute(sql: """
             UPDATE conversations
@@ -111,8 +129,8 @@ final class MessageRepository {
         }
     }
 
-    /// Scoped by owner: with ids shared across accounts, an update by `id` alone would
-    /// flip the delivery status on the other account's copy.
+    /// Scoped by owner: with ids shared across accounts, an update by `id`
+    /// alone would flip the delivery status on the other account's copy.
     func updateDeliveryStatus(messageId: String, ownerUserId: String, status: DeliveryStatus) throws {
         try dbQueue.write { db in
             if var message = try Message.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId)) {

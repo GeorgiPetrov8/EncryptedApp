@@ -4,11 +4,12 @@ import os
 
 /// Owns the SQLite connection and schema migrations.
 ///
-/// Design note on "encrypted database": the original spec calls for SQLCipher
-/// (whole-file encryption). SQLCipher requires linking a custom OpenSSL-backed
-/// SQLite build, which is a heavier dependency than fits a scaffold. Instead, this
-/// project layers iOS Data Protection on the database files with application-level
-/// AES-256-GCM encryption of every sensitive column.
+/// Design note on "encrypted database": the original spec calls for
+/// SQLCipher (whole-file encryption). SQLCipher requires linking a custom
+/// OpenSSL-backed SQLite build, which is a heavier dependency than fits a
+/// scaffold. Instead, this project layers iOS Data Protection on the
+/// database files with application-level AES-256-GCM encryption of every
+/// sensitive column.
 final class DatabaseManager {
     let dbQueue: DatabaseQueue
     private let databaseURL: URL
@@ -22,9 +23,10 @@ final class DatabaseManager {
             create: true
         )
 
-        // Protect the directory before the database exists, so files created inside
-        // inherit the class — this closes the window where `-wal` and `-shm` are
-        // created by SQLite before any client-side attribute could apply (Bug #22).
+        // Protect the directory before the database exists, so files created
+        // inside inherit the class — this closes the window where `-wal` and
+        // `-shm` are created by SQLite before any client-side attribute
+        // could apply (Bug #22).
         try Self.applyFileProtection(to: folder)
 
         let dbURL = folder.appendingPathComponent(fileName)
@@ -32,8 +34,6 @@ final class DatabaseManager {
 
         var config = Configuration()
         config.foreignKeysEnabled = true
-        // SQLite recreates `-wal`/`-shm` after a clean shutdown, so the attribute has
-        // to be reapplied whenever the database is opened (Bug #22).
         config.prepareDatabase { _ in
             Self.applyFileProtectionToDatabaseFiles(at: dbURL)
         }
@@ -42,6 +42,9 @@ final class DatabaseManager {
 
         Self.applyFileProtectionToDatabaseFiles(at: dbURL)
         try Self.migrator.migrate(dbQueue)
+
+        // Migration/SQLite може да създаде или пресъздаде WAL/SHM файловете.
+        Self.applyFileProtectionToDatabaseFiles(at: dbURL)
 
         #if DEBUG
         Self.assertFileProtectionCoversAllDatabaseFiles(at: dbURL)
@@ -59,61 +62,98 @@ final class DatabaseManager {
 
     private static func applyFileProtection(to url: URL) throws {
         try FileManager.default.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            [
+                .protectionKey:
+                    FileProtectionType
+                        .completeUntilFirstUserAuthentication
+            ],
             ofItemAtPath: url.path
         )
     }
 
-    private static func applyFileProtectionToDatabaseFiles(at dbURL: URL) {
-        for url in databaseFileURLs(dbURL) where FileManager.default.fileExists(atPath: url.path) {
+    private static func applyFileProtectionToDatabaseFiles(
+        at dbURL: URL
+    ) {
+        let fileManager = FileManager.default
+
+        for url in databaseFileURLs(dbURL)
+        where fileManager.fileExists(atPath: url.path) {
             do {
                 try applyFileProtection(to: url)
             } catch {
-                logger.error("Couldn't apply file protection to \(url.lastPathComponent, privacy: .public)")
+                logger.error(
+                    """
+                    Couldn't apply file protection to \
+                    \(url.lastPathComponent, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """
+                )
             }
         }
     }
 
     #if DEBUG
-    private static func assertFileProtectionCoversAllDatabaseFiles(at dbURL: URL) {
+    private static func assertFileProtectionCoversAllDatabaseFiles(
+        at dbURL: URL
+    ) {
         #if targetEnvironment(simulator)
-            logger.debug("Skipping file-protection assertion on Simulator — Data Protection isn't reliably enforced there.")
-            return
+
+        // Simulator не моделира надеждно iOS Data Protection.
+        // protectionKey може да е nil дори след успешно setAttributes.
+        logger.debug(
+            "Skipping file-protection assertion in Simulator"
+        )
+        return
+
         #else
-            for url in databaseFileURLs(dbURL) where FileManager.default.fileExists(atPath: url.path) {
-                let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-                let protection = attributes?[.protectionKey] as? FileProtectionType
+
+        for url in databaseFileURLs(dbURL)
+        where FileManager.default.fileExists(atPath: url.path) {
+            do {
+                let attributes = try FileManager.default
+                    .attributesOfItem(atPath: url.path)
+
+                let attribute = attributes[.protectionKey]
+
+                let protection: FileProtectionType?
+
+                if let value = attribute as? FileProtectionType {
+                    protection = value
+                } else if let rawValue = attribute as? String {
+                    protection = FileProtectionType(rawValue: rawValue)
+                } else {
+                    protection = nil
+                }
+
                 assert(
-                    protection == .completeUntilFirstUserAuthentication,
-                    "Unprotected database file: \(url.lastPathComponent)"
+                    protection
+                        == .completeUntilFirstUserAuthentication,
+                    """
+                    Unprotected database file: \
+                    \(url.lastPathComponent); \
+                    protection: \(String(describing: attribute))
+                    """
+                )
+            } catch {
+                assertionFailure(
+                    """
+                    Could not inspect file protection for \
+                    \(url.lastPathComponent): \(error)
+                    """
                 )
             }
-    #endif
-}
-//    #if DEBUG
-//    private static func assertFileProtectionCoversAllDatabaseFiles(at dbURL: URL) {
-//        for url in databaseFileURLs(dbURL) where FileManager.default.fileExists(atPath: url.path) {
-//            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-//            let protection = attributes?[.protectionKey] as? FileProtectionType
-//            assert(
-//                protection == .completeUntilFirstUserAuthentication,
-//                "Unprotected database file: \(url.lastPathComponent)"
-//            )
-//        }
-//    }
+        }
 
-    /// FIX: guards against the exact mistake this file just corrected.
-    ///
-    /// Migration v6 lived in its own file as `MediaCompositeKeyMigration.register(in:)`
-    /// with a comment instructing the reader to wire it up — and nobody did, so the
-    /// `media` table silently kept the single-column primary key that v6 exists to
-    /// replace. Every `MediaRepository` method written against the composite key was
-    /// operating on a schema that couldn't support it.
-    ///
-    /// A migration that has to be remembered is a migration that gets forgotten. This
-    /// assert makes an unregistered migration fail loudly in development instead of
-    /// only surfacing as a constraint violation the first time two accounts cache the
-    /// same blob.
+        #endif
+    }
+
+    /// Guards against a mistake this project has already made once: a
+    /// migration shipped in its own file as a `register(in:)` function that
+    /// a comment asked the reader to wire up — and nobody did, so the
+    /// shipped schema silently kept the exact primary key that migration
+    /// existed to replace. Every migration since is written directly in
+    /// this file's `migrator`, and this list is a second, independent check
+    /// that catches a typo'd or accidentally-removed registration.
     private static func assertExpectedMigrationsApplied(_ dbQueue: DatabaseQueue) throws {
         let applied = try dbQueue.read { db in try migrator.appliedIdentifiers(db) }
         for expected in expectedMigrationIdentifiers {
@@ -127,7 +167,9 @@ final class DatabaseManager {
         "v3_account_scoping_and_replay_protection",
         "v4_activity_ordering_and_media_ownership",
         "v5_composite_primary_keys",
-        "v6_media_composite_primary_key"
+        "v6_media_composite_primary_key",
+        "v7_shared_note_pad",
+        "v8_alarms",
     ]
     #endif
 
@@ -259,15 +301,7 @@ final class DatabaseManager {
         }
 
         /// Composite primary keys for `users`, `conversations` and `messages`.
-        ///
-        /// v3 added `ownerUserId` as a *column* and filtered every read by it, but left
-        /// the primary keys as `id` alone. That was survivable only while ids were
-        /// random UUIDs. Bug #14's deterministic conversation id removed the luck, and
-        /// `Message.id` comes from the sender's `localMessageId`, so two accounts on
-        /// the same device collide on every exchanged message.
         migrator.registerMigration("v5_composite_primary_keys", foreignKeyChecks: .deferred) { db in
-
-            // MARK: users
 
             try db.create(table: "users_new") { t in
                 t.column("ownerUserId", .text).notNull()
@@ -284,10 +318,6 @@ final class DatabaseManager {
                 t.uniqueKey(["ownerUserId", "username"])
             }
 
-            // Pre-v5 `users` rows carry no owner, so there is no way to know which
-            // account pinned them. Copying each row into every known account's
-            // namespace preserves display names and pinned keys for all existing
-            // accounts; dropping them would silently reset every trust decision.
             try db.execute(sql: """
                 INSERT OR IGNORE INTO users_new
                     (ownerUserId, id, username, publicKey, createdAt, identitySigningKey,
@@ -302,8 +332,6 @@ final class DatabaseManager {
             try db.drop(table: "users")
             try db.rename(table: "users_new", to: "users")
             try db.create(index: "idx_users_owner", on: "users", columns: ["ownerUserId"])
-
-            // MARK: conversations
 
             try db.create(table: "conversations_new") { t in
                 t.column("ownerUserId", .text).notNull()
@@ -326,8 +354,6 @@ final class DatabaseManager {
                 columns: ["ownerUserId", "lastMessageAt"]
             )
 
-            // MARK: messages
-
             try db.create(table: "messages_new") { t in
                 t.column("ownerUserId", .text).notNull()
                 t.column("id", .text).notNull()
@@ -338,8 +364,6 @@ final class DatabaseManager {
                 t.column("deliveryStatus", .text).notNull()
                 t.column("createdAt", .datetime).notNull()
                 t.primaryKey(["ownerUserId", "id"])
-                // The foreign key must be composite too, otherwise a message could
-                // reference a conversation belonging to a different account.
                 t.foreignKey(
                     ["ownerUserId", "conversationId"],
                     references: "conversations",
@@ -360,11 +384,6 @@ final class DatabaseManager {
                 on: "messages",
                 columns: ["ownerUserId", "conversationId", "createdAt"]
             )
-
-            // MARK: media — interim rebuild so the composite foreign key can be added.
-            //
-            // The primary key stays single-column here and is corrected in v6; see the
-            // note there for why the original reasoning was wrong.
 
             try db.create(table: "media_new") { t in
                 t.column("id", .text).primaryKey()
@@ -399,22 +418,8 @@ final class DatabaseManager {
             try db.create(index: "idx_media_message", on: "media", columns: ["ownerUserId", "messageId"])
         }
 
-        /// FIX: v6 is now registered here, in the migrator, rather than sitting in a
-        /// separate file behind a comment telling the reader to wire it up.
-        ///
-        /// It wasn't wired up. `MediaCompositeKeyMigration.register(in:)` was never
-        /// called from anywhere, so the `media` table kept the single-column primary
-        /// key while `MediaRepository.isReferencedByOtherOwner` and
-        /// `exclusivelyOwnedPaths` were written assuming the composite one — queries
-        /// against a schema that could not support them. The second account to cache a
-        /// blob would have hit a primary-key violation.
-        ///
-        /// On the substance: v5 justified leaving `media.id` alone as "a server-assigned
-        /// upload id, globally unique — only the parent reference needs an owner". The
-        /// premise is true and the conclusion doesn't follow. Global uniqueness of the
-        /// *identifier* isn't the question; the question is how many rows reference it,
-        /// and the answer is one per account. When Alice sends Bob a photo, both cache
-        /// the same blob under the same `mediaId` and both need a row.
+        /// `media` gets a composite primary key too — two accounts caching
+        /// the same server-assigned blob each need their own row.
         migrator.registerMigration("v6_media_composite_primary_key", foreignKeyChecks: .deferred) { db in
             try db.create(table: "media_v6") { t in
                 t.column("ownerUserId", .text).notNull()
@@ -446,9 +451,70 @@ final class DatabaseManager {
 
             try db.create(index: "idx_media_owner", on: "media", columns: ["ownerUserId"])
             try db.create(index: "idx_media_owner_message", on: "media", columns: ["ownerUserId", "messageId"])
-            // Supports `isReferencedByOtherOwner` and `exclusivelyOwnedPaths`, both of
-            // which look a blob up across owners.
             try db.create(index: "idx_media_id", on: "media", columns: ["id"])
+        }
+
+        /// The shared note/todo/buy pad's storage.
+        migrator.registerMigration("v7_shared_note_pad") { db in
+            try db.create(table: "note_pad_items") { t in
+                t.column("ownerUserId", .text).notNull()
+                t.column("conversationId", .text).notNull()
+                t.column("itemId", .text).notNull()
+                t.column("text", .text).notNull()
+                t.column("isDone", .boolean).notNull().defaults(to: false)
+                t.column("isDeleted", .boolean).notNull().defaults(to: false)
+                t.column("updatedAt", .datetime).notNull()
+                t.column("updatedBy", .text).notNull()
+                t.primaryKey(["ownerUserId", "conversationId", "itemId"])
+                t.foreignKey(
+                    ["ownerUserId", "conversationId"],
+                    references: "conversations",
+                    columns: ["ownerUserId", "id"],
+                    onDelete: .cascade
+                )
+            }
+            try db.create(
+                index: "idx_note_pad_owner_conversation",
+                on: "note_pad_items",
+                columns: ["ownerUserId", "conversationId"]
+            )
+        }
+
+        /// FIX (alarm): alarm storage.
+        ///
+        /// Composite-keyed `(ownerUserId, id)` from the start, like every
+        /// table designed after the v5/v6 account-isolation corrections.
+        ///
+        /// `accountabilityPeerId` deliberately carries **no** foreign key to
+        /// `users`. A cascade delete would silently remove an alarm when the
+        /// contact it points at is deleted, and an alarm disappearing
+        /// without warning is a worse failure than one that survives and
+        /// reports the problem — which is what
+        /// `AlarmRepository.clearMissingAccountabilityPeers` does instead,
+        /// downgrading the alarm to a task challenge so it stays usable.
+        migrator.registerMigration("v8_alarms") { db in
+            try db.create(table: "alarms") { t in
+                t.column("ownerUserId", .text).notNull()
+                t.column("id", .text).notNull()
+                t.column("hour", .integer).notNull()
+                t.column("minute", .integer).notNull()
+                t.column("isEnabled", .boolean).notNull().defaults(to: true)
+                t.column("label", .text).notNull().defaults(to: "Alarm")
+                // JSON array of Calendar weekday values (1 = Sunday).
+                t.column("repeatWeekdays", .text).notNull().defaults(to: "[]")
+                t.column("dismissalMode", .text).notNull().defaults(to: "tasks")
+                t.column("accountabilityPeerId", .text)
+                t.column("requiredTaskCount", .integer).notNull().defaults(to: 3)
+                t.column("lastFiredAt", .datetime)
+                t.column("lastDismissedAt", .datetime)
+                t.column("createdAt", .datetime).notNull()
+                t.primaryKey(["ownerUserId", "id"])
+            }
+            try db.create(
+                index: "idx_alarms_owner_enabled",
+                on: "alarms",
+                columns: ["ownerUserId", "isEnabled"]
+            )
         }
 
         return migrator

@@ -3,10 +3,6 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var container: AppContainer
 
-    /// FIX: whether App Lock is currently covering the screen.
-    ///
-    /// Extracted so both the branch selection and the unlock guard read the same
-    /// condition, rather than expressing it twice and risking drift.
     private var isAppLockBlocking: Bool {
         container.appLockService.isEnabled && container.appLockService.isLocked
     }
@@ -22,7 +18,29 @@ struct RootView: View {
             }
         }
         .animation(.default, value: container.authService.isAuthenticated)
-        // Opaque cover while the app is not active (Bug #24).
+        // FIX (alarm): the ringing challenge sits above every normal screen,
+        // including the app lock.
+        //
+        // Above the app lock on purpose: silencing an alarm shouldn't
+        // require Face ID. The maths challenge touches no encrypted data,
+        // so there's nothing to protect — and forcing authentication first
+        // would mean fumbling biometrics half-asleep before you can even
+        // start. The one case that genuinely needs the storage key unlocked
+        // is the message mode, and `AlarmRingingView` prompts for that
+        // itself, at the point it actually matters.
+        //
+        // An overlay rather than a `.sheet` because sheets are
+        // interactively dismissible by default, and a downward swipe is
+        // exactly the half-asleep reflex this feature exists to defeat.
+        .overlay {
+            if container.alarmService.ringingAlarm != nil {
+                AlarmRingingView()
+                    .transition(.opacity)
+            }
+        }
+        // The privacy overlay stays outermost, so the app-switcher snapshot
+        // shows the lock screen rather than a ringing alarm naming the
+        // contact you're about to message.
         .overlay {
             if container.appLockService.isObscured {
                 PrivacyOverlay()
@@ -30,19 +48,7 @@ struct RootView: View {
             }
         }
         .animation(.easeInOut(duration: 0.15), value: container.appLockService.isObscured)
-        // FIX: don't race AppLockView for the biometric sensor.
-        //
-        // This `.task` is attached to the outer `Group`, so it runs regardless of which
-        // branch is showing. On a cold launch with App Lock enabled, that meant two
-        // concurrent authentication requests: this one reading the `.userPresence`
-        // Keychain item, and `AppLockView.task` calling `LAContext.evaluatePolicy`.
-        // iOS serialises or drops the overlapping sheets, and whichever loses leaves
-        // `isStorageUnlocked == false` — with no second chance, because a `.task`
-        // fires once per view lifetime. The "prompt once, up front" intent this was
-        // written for failed in exactly the configuration it was written for.
-        //
-        // The guard defers to `AppLockView`, which owns the prompt while it is
-        // showing and calls `unlockStorage()` itself once the user is through.
+        .animation(.easeInOut(duration: 0.2), value: container.alarmService.ringingAlarm?.id)
         .task(id: isAppLockBlocking) {
             guard container.authService.isAuthenticated,
                   !container.authService.isStorageUnlocked,
@@ -52,8 +58,8 @@ struct RootView: View {
     }
 }
 
-/// Deliberately opaque rather than blurred: a blur of a chat transcript can still
-/// leak message shape, sender colours and rough length.
+/// Deliberately opaque rather than blurred: a blur of a chat transcript can
+/// still leak message shape, sender colours and rough length.
 private struct PrivacyOverlay: View {
     var body: some View {
         ZStack {
@@ -72,9 +78,6 @@ private struct PrivacyOverlay: View {
     }
 }
 
-/// Owns the single `AuthViewModel` shared by the login/register toggle.
-/// Takes `container` as an explicit init parameter because it needs it *before*
-/// `body` runs, to construct the `@StateObject`.
 private struct AuthContainerView: View {
     @StateObject private var viewModel: AuthViewModel
     @State private var showRegister = false

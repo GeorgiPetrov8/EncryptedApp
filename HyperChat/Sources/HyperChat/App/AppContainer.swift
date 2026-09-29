@@ -35,14 +35,20 @@ final class AppContainer: ObservableObject {
     let alarmService: AlarmService
     let appLockService: AppLockService
     let accountDeletionService: AccountDeletionService
-
+    let tenorService: TenorService
+    let appearanceStore: AppearanceStore
+    let callService: CallService
+    let invitationService: InvitationService
+    
     private let logger = Logger(subsystem: "com.HyperChat", category: "container")
     private var cancellables = Set<AnyCancellable>()
 
     private init(database: DatabaseManager) {
         self.database = database
         self.cryptoService = CryptoService()
-
+        self.tenorService = TenorService()
+        self.appearanceStore = AppearanceStore()
+        
         let tokenStore = SessionTokenStore()
         self.sessionTokenStore = tokenStore
 
@@ -69,6 +75,20 @@ final class AppContainer: ObservableObject {
             tokenStore: tokenStore
         )
 
+        self.invitationService = InvitationService(
+            conversationRepository: conversationRepository,
+            userRepository: userRepository,
+            messageRepository: messageRepository,
+            authService: authService,
+            apiClient: apiClient
+        )
+        
+        self.callService = CallService(
+            authService: authService,
+            userRepository: userRepository,
+            conversationRepository: conversationRepository
+        )
+        
         self.mediaEncryptionService = MediaEncryptionService(
             cryptoService: cryptoService,
             mediaRepository: mediaRepository,

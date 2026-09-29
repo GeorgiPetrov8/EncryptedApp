@@ -4,6 +4,8 @@ import GRDB
 enum MediaType: String, Codable, DatabaseValueConvertible {
     case image
     case video
+    case audio
+    case document
 }
 
 /// Metadata for an encrypted media file. The actual encrypted bytes live on

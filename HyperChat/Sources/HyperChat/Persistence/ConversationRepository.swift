@@ -77,6 +77,18 @@ final class ConversationRepository {
         }
     }
 
+    func fetchAll(
+        ownerUserId: String,
+        relationshipState: RelationshipState
+    ) throws -> [Conversation] {
+        try dbQueue.read { db in
+            try Conversation
+                .filter(Column("ownerUserId") == ownerUserId)
+                .filter(Column("relationshipState") == relationshipState.rawValue)
+                .fetchAll(db)
+        }
+    }
+    
     func deleteAll(ownerUserId: String) throws {
         try dbQueue.write { db in
             _ = try Conversation.filter(Column("ownerUserId") == ownerUserId).deleteAll(db)

@@ -48,6 +48,8 @@ struct Message: Codable, Identifiable, Equatable, FetchableRecord, PersistableRe
     var contentType: MessageContentType
     var deliveryStatus: DeliveryStatus
     var createdAt: Date
+    var deliveredAt: Date?
+    var readAt: Date?
 
     /// True when this row is a placeholder standing in for an envelope that failed
     /// to decrypt, rather than real content.

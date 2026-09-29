@@ -2,6 +2,17 @@ import Foundation
 import CryptoKit
 import GRDB
 
+enum RelationshipState: String, Codable, Hashable {
+    case invitedByMe
+    case invitedByThem
+    case accepted
+    case declined
+
+    var allowsSending: Bool {
+        self == .accepted
+    }
+}
+
 /// A conversation between two (or, in a future group-chat extension, more)
 /// participants. `participantIds` is stored as JSON automatically by GRDB's
 /// Codable-record support, since arrays aren't a native SQLite column type.
@@ -14,6 +25,11 @@ struct Conversation: Codable, Identifiable, Equatable, Hashable, FetchableRecord
     var participantIds: [String]
     var isGroup: Bool
     var createdAt: Date
+    
+    var relationshipState: RelationshipState
+    var inviteNote: String?
+    var inviteSentAt: Date?
+    var inviteRespondedAt: Date?
 
     /// FIX (Bug #15): denormalised "last activity" timestamp.
     ///
@@ -29,7 +45,11 @@ struct Conversation: Codable, Identifiable, Equatable, Hashable, FetchableRecord
         participantIds: [String],
         isGroup: Bool,
         createdAt: Date,
-        lastMessageAt: Date? = nil
+        lastMessageAt: Date? = nil,
+        relationshipState: RelationshipState = .accepted,
+        inviteNote: String? = nil,
+        inviteSentAt: Date? = nil,
+        inviteRespondedAt: Date? = nil
     ) {
         self.id = id
         self.ownerUserId = ownerUserId
@@ -37,6 +57,10 @@ struct Conversation: Codable, Identifiable, Equatable, Hashable, FetchableRecord
         self.isGroup = isGroup
         self.createdAt = createdAt
         self.lastMessageAt = lastMessageAt
+        self.relationshipState = relationshipState
+        self.inviteNote = inviteNote
+        self.inviteSentAt = inviteSentAt
+        self.inviteRespondedAt = inviteRespondedAt
     }
 
     /// Convenience for 1:1 chats: the other participant, given my own id.

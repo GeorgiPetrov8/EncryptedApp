@@ -203,6 +203,38 @@ final class NotePadService: ObservableObject {
         itemsByConversation[conversationId] = loaded
     }
 
+    /// Re-sends the current state of this user's notepad items.
+    ///
+    /// Each item is transmitted as a complete state rather than a delta,
+    /// so sending the same operation more than once is safe: the receiving
+    /// side uses `upsertIfNewer` and ignores an older/equal state.
+    func resyncOwnItems(in conversation: Conversation) async {
+        guard let myUserId = authService.currentUserId else { return }
+
+        let currentItems =
+            (try? repository.fetchAll(
+                ownerUserId: myUserId,
+                conversationId: conversation.id
+            )) ?? []
+
+        for item in currentItems {
+            let operation = NotePadOperation(
+                itemId: item.itemId,
+                text: item.text,
+                isDone: item.isDone,
+                isDeleted: item.isDeleted,
+                updatedAt: item.updatedAt,
+                updatedBy: item.updatedBy
+            )
+
+            do {
+                try await sendHandler?(operation, conversation)
+            } catch {
+                logger.error("Failed to resync notepad item \(item.itemId)")
+            }
+        }
+    }
+    
     /// Clears the in-memory cache on logout, so a different local account
     /// signing in next doesn't briefly see the previous account's pad
     /// before its own `loadItems` call runs. Does **not** touch the

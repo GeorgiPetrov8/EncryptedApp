@@ -30,19 +30,14 @@ final class AlarmService: ObservableObject {
     private let conversationRepository: ConversationRepository
     private let logger = Logger(subsystem: "com.HyperChat", category: "alarm")
 
-    /// Set by `AppContainer` after construction, same pattern as
-    /// `NotePadService.setSendHandler` — `MessagingService` is built after
-    /// this service, so the dependency can't go through the initializer
+    /// Set by `AppContainer` after construction — `MessagingService` is built
+    /// after this service, so the dependency can't go through the initializer
     /// without a cycle.
     private var sendMessageHandler: ((String, Conversation) async throws -> Void)?
 
-    /// An alarm nobody engages with eventually gives up.
-    ///
-    /// Without this, a phone left ringing in an empty flat loops audio and
-    /// haptics until the battery dies. Thirty minutes is long enough that a
-    /// genuinely sound sleeper still gets woken, short enough that it isn't
-    /// destructive. It also bounds the "resume after force-quit" window, so
-    /// an alarm from this morning can't ambush you at lunchtime.
+    /// An alarm nobody engages with eventually gives up, instead of looping
+    /// audio and haptics until the battery dies. It also bounds the "resume
+    /// after force-quit" window.
     static let autoExpiry: TimeInterval = 30 * 60
 
     /// Failed send attempts before `.messageContact` degrades to tasks.
@@ -73,13 +68,7 @@ final class AlarmService: ObservableObject {
 
     // MARK: Lifecycle
 
-    /// Called when an account becomes active, and whenever the app
-    /// foregrounds.
-    ///
-    /// The foreground call matters for two separate reasons: it refreshes
-    /// the burst notifications for the next occurrence (see
-    /// `AlarmScheduler`), and it re-checks for an alarm that fired while
-    /// the app was closed.
+    /// Called when an account becomes active, and whenever the app foregrounds.
     func activate() async {
         guard let ownerUserId = authService.currentUserId else { return }
 
@@ -88,6 +77,9 @@ final class AlarmService: ObservableObject {
         pruneDeletedAccountabilityContacts(ownerUserId: ownerUserId)
         await scheduler.reschedule(alarms: alarms)
         resumeRingingIfNeeded(ownerUserId: ownerUserId)
+        // FIX (Pack 8): the in-app check this method's documentation always
+        // claimed but never did.
+        checkForDueAlarm()
     }
 
     func requestNotificationPermission() async {
@@ -100,20 +92,29 @@ final class AlarmService: ObservableObject {
         alarms = (try? repository.fetchAll(ownerUserId: ownerUserId)) ?? []
     }
 
-    /// An alarm pointing at a deleted contact can't be silenced by messaging
-    /// them, so it's downgraded to a task challenge rather than left
-    /// unsilenceable. See `Alarm.accountabilityPeerId` for why this is an
-    /// explicit sweep instead of a cascading foreign key.
+    /// FIX (Pack 8, Medium #10): a read failure is no longer treated as "this
+    /// account has no contacts".
+    ///
+    /// `(try? fetchAll) ?? []` turned a database error into an empty contact
+    /// list, which then downgraded *every* `.messageContact` alarm to tasks and
+    /// permanently discarded the peer ids. Now the sweep is skipped entirely
+    /// rather than acting on a false empty.
     private func pruneDeletedAccountabilityContacts(ownerUserId: String) {
-        let existing = Set(((try? userRepository.fetchAll(ownerUserId: ownerUserId)) ?? []).map(\.id))
-        try? repository.clearMissingAccountabilityPeers(ownerUserId: ownerUserId, existingPeerIds: existing)
+        let contacts: [User]
+        do {
+            contacts = try userRepository.fetchAll(ownerUserId: ownerUserId)
+        } catch {
+            logger.error("Couldn't read contacts; skipping accountability sweep")
+            return
+        }
+        try? repository.clearMissingAccountabilityPeers(
+            ownerUserId: ownerUserId,
+            existingPeerIds: Set(contacts.map(\.id))
+        )
         reloadAlarms()
     }
 
     /// Restores a ringing alarm after the app was force-quit mid-challenge.
-    ///
-    /// Swiping the app away is otherwise the one bypass that needs no
-    /// thought at all, which would make the entire feature decorative.
     private func resumeRingingIfNeeded(ownerUserId: String) {
         guard ringingAlarm == nil,
               let unresolved = try? repository.fetchUnresolvedRinging(
@@ -121,7 +122,28 @@ final class AlarmService: ObservableObject {
               )
         else { return }
         logger.info("Resuming an alarm that was still ringing before the app closed")
-        beginRinging(unresolved, markFired: false)
+        beginRinging(unresolved, firedAt: unresolved.lastFiredAt ?? Date(), markFired: false)
+    }
+
+    /// FIX (Pack 8): starts an alarm whose scheduled time has just passed but
+    /// which was never acknowledged — the notification was missed, suppressed
+    /// by a Focus mode, or swiped away.
+    ///
+    /// Before this, `resumeRingingIfNeeded` only resumed an alarm *already*
+    /// marked as fired, so opening the app at alarm time with no delivered
+    /// notification showed nothing at all.
+    private func checkForDueAlarm() {
+        guard ringingAlarm == nil else { return }
+        let now = Date()
+
+        for alarm in alarms where alarm.isEnabled {
+            guard let due = scheduler.mostRecentOccurrence(of: alarm, before: now),
+                  now.timeIntervalSince(due) < Self.autoExpiry else { continue }
+            if let dismissedAt = alarm.lastDismissedAt, dismissedAt >= due { continue }
+
+            beginRinging(alarm, firedAt: due, markFired: true)
+            return
+        }
     }
 
     // MARK: Editing
@@ -146,36 +168,68 @@ final class AlarmService: ObservableObject {
 
     var enabledCount: Int { alarms.filter(\.isEnabled).count }
 
-    /// True when enabling one more alarm would exceed what iOS will
-    /// actually schedule — surfaced in the UI rather than letting the
-    /// overflow vanish silently.
+    /// True when enabling one more alarm would exceed what iOS will actually
+    /// schedule.
     var isAtEnabledLimit: Bool { enabledCount >= AlarmScheduler.maxEnabledAlarms }
 
     // MARK: Ringing
 
-    /// Entry point from a tapped notification, or from the in-app check
-    /// that runs when the app opens at a time an alarm should be ringing.
-    func fireAlarm(id: String) {
+    /// Entry point from a tapped or delivered notification.
+    ///
+    /// FIX (Pack 8): takes the fire date and validates it, instead of trusting
+    /// that any tap means "ring now".
+    func fireAlarm(id: String, firedAt: Date = Date()) {
         guard ringingAlarm == nil,
               let ownerUserId = authService.currentUserId,
               let alarm = try? repository.fetch(ownerUserId: ownerUserId, id: id)
         else { return }
-        beginRinging(alarm, markFired: true)
+
+        // A disabled alarm must not ring — toggling an alarm off and then
+        // tapping its already-delivered notification used to start a
+        // challenge for an alarm the user switched off.
+        //
+        // Note: Pack 8's draft allowed `alarm.isEnabled || alarm.repeatsWeekly`,
+        // which would still ring a *disabled* repeating alarm. A one-shot alarm
+        // stays enabled until it's dismissed, so `isEnabled` alone is correct.
+        guard alarm.isEnabled else {
+            logger.info("Ignoring a notification for a disabled alarm")
+            return
+        }
+
+        // Already answered this occurrence (e.g. a burst follow-up tapped
+        // after the challenge was solved).
+        if let dismissedAt = alarm.lastDismissedAt, dismissedAt >= firedAt {
+            logger.debug("Alarm occurrence already dismissed; ignoring")
+            return
+        }
+
+        beginRinging(alarm, firedAt: firedAt, markFired: true)
     }
 
-    private func beginRinging(_ alarm: Alarm, markFired: Bool) {
-        ringingAlarm = alarm
+    /// FIX (Pack 8): the expiry is now measured from the fire time of *this*
+    /// occurrence.
+    ///
+    /// It used to call `scheduleExpiry(from: alarm.lastFiredAt ?? Date())`
+    /// with the `alarm` value read *before* `markFired` wrote the new time.
+    /// From the second firing onwards that value was yesterday's, so the
+    /// remaining time came out as 30 minutes minus ~24 hours — negative — and
+    /// the alarm was marked dismissed instantly without ever ringing. Only a
+    /// brand-new alarm's first firing worked.
+    private func beginRinging(_ alarm: Alarm, firedAt: Date, markFired: Bool) {
+        var ringing = alarm
+        if markFired {
+            try? repository.markFired(ownerUserId: alarm.ownerUserId, id: alarm.id, at: firedAt)
+            ringing.lastFiredAt = firedAt
+        }
+
+        ringingAlarm = ringing
         sendFailures = 0
         fallbackNotice = nil
         challengeError = nil
 
-        if markFired {
-            try? repository.markFired(ownerUserId: alarm.ownerUserId, id: alarm.id)
-        }
-
-        challenge = makeChallenge(for: alarm)
+        challenge = makeChallenge(for: ringing)
         audio.start()
-        scheduleExpiry(from: alarm.lastFiredAt ?? Date())
+        scheduleExpiry(from: firedAt)
     }
 
     private func makeChallenge(for alarm: Alarm) -> Challenge {
@@ -187,9 +241,6 @@ final class AlarmService: ObservableObject {
             guard let peerId = alarm.accountabilityPeerId,
                   let peer = try? userRepository.fetch(ownerUserId: alarm.ownerUserId, id: peerId)
             else {
-                // The contact is gone despite the sweep above (deleted
-                // between sweep and fire). Degrade rather than present an
-                // impossible challenge.
                 fallbackNotice = "The contact for this alarm is no longer available, so it's asking for problems instead."
                 return .tasks(completed: 0, required: max(1, alarm.requiredTaskCount), task: .random())
             }
@@ -202,13 +253,13 @@ final class AlarmService: ObservableObject {
         expiryTask?.cancel()
         let remaining = Self.autoExpiry - Date().timeIntervalSince(firedAt)
         guard remaining > 0 else {
-            finishRinging(dismissed: false)
+            finishRinging()
             return
         }
         expiryTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            await MainActor.run { self?.finishRinging(dismissed: false) }
+            self?.finishRinging()
         }
     }
 
@@ -219,11 +270,9 @@ final class AlarmService: ObservableObject {
 
         guard task.isCorrect(input) else {
             challengeError = "Not quite."
-            // A wrong answer regenerates the problem but keeps the progress
-            // counter. Resetting to zero punishes a genuine half-asleep slip
-            // far out of proportion; leaving the same numbers up would let
-            // someone brute-force a single problem by typing nearby values.
-            // Regenerating blocks the brute force without the cruelty.
+            // Regenerates the problem but keeps progress: resetting to zero
+            // punishes a half-asleep slip; keeping the same numbers allows
+            // brute force.
             challenge = .tasks(completed: completed, required: required, task: .random(excluding: task))
             return
         }
@@ -231,7 +280,7 @@ final class AlarmService: ObservableObject {
         challengeError = nil
         let next = completed + 1
         if next >= required {
-            finishRinging(dismissed: true)
+            finishRinging()
         } else {
             challenge = .tasks(completed: next, required: required, task: .random(excluding: task))
         }
@@ -255,18 +304,14 @@ final class AlarmService: ObservableObject {
         do {
             let conversation = try resolveConversation(with: peerId, ownerUserId: alarm.ownerUserId)
             try await sendMessageHandler?(word, conversation)
-            finishRinging(dismissed: true)
+            finishRinging()
         } catch {
             sendFailures += 1
             logger.error("Couldn't send the alarm word: \(String(describing: type(of: error)), privacy: .public)")
 
             if sendFailures >= Self.sendFailuresBeforeFallback {
-                // Falling back to tasks rather than just letting the alarm
-                // stop is the whole reason this branch exists. Airplane
-                // mode is the obvious way to defeat a message-based alarm —
-                // switch it on, the send can't succeed, and if failure meant
-                // dismissal the challenge would be worth nothing. Tasks
-                // still require being awake, and they need no network.
+                // Airplane mode must not become the way out — fall back to
+                // tasks, which need no network but still need you awake.
                 fallbackNotice = """
                     Couldn't reach \(peerUsername) — the message wasn't delivered. \
                     Solve the problems instead to stop the alarm.
@@ -282,14 +327,8 @@ final class AlarmService: ObservableObject {
         }
     }
 
-    /// Finds the existing conversation with this contact, or creates one
-    /// locally.
-    ///
-    /// Local-only on purpose: `MessagingService.startConversation` does a
-    /// directory lookup over the network, and this runs at the exact moment
-    /// connectivity is least certain. The deterministic conversation id
-    /// means a locally-created conversation converges with the peer's own
-    /// anyway, so nothing is lost by not asking the server.
+    /// Finds or locally creates the conversation with this contact — local-only
+    /// because this runs exactly when connectivity is least certain.
     private func resolveConversation(with peerId: String, ownerUserId: String) throws -> Conversation {
         if let existing = try conversationRepository.findDirectConversation(
             ownerUserId: ownerUserId, userA: ownerUserId, userB: peerId
@@ -310,16 +349,15 @@ final class AlarmService: ObservableObject {
 
     // MARK: Finishing
 
-    private func finishRinging(dismissed: Bool) {
+    /// FIX (Pack 8): the unused `dismissed:` parameter is gone — solved and
+    /// expired alarms are deliberately recorded the same way, so an expired
+    /// alarm doesn't resume on next launch.
+    private func finishRinging() {
         expiryTask?.cancel()
         expiryTask = nil
         audio.stop()
 
         if let alarm = ringingAlarm {
-            // Recorded whether or not the challenge was completed: an
-            // expired alarm must not resume on next launch, or a
-            // 6am alarm nobody answered would reappear whenever the app is
-            // next opened.
             try? repository.markDismissed(ownerUserId: alarm.ownerUserId, id: alarm.id)
         }
 
@@ -333,9 +371,7 @@ final class AlarmService: ObservableObject {
         Task { await scheduler.reschedule(alarms: alarms) }
     }
 
-    /// Stops audio without resolving the challenge — used when the account
-    /// signs out mid-alarm, where continuing to ring for a user who is no
-    /// longer signed in makes no sense.
+    /// Stops audio without resolving the challenge — used on sign-out.
     func stopForLogout() {
         expiryTask?.cancel()
         expiryTask = nil

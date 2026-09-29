@@ -24,9 +24,7 @@ final class DatabaseManager {
         )
 
         // Protect the directory before the database exists, so files created
-        // inside inherit the class — this closes the window where `-wal` and
-        // `-shm` are created by SQLite before any client-side attribute
-        // could apply (Bug #22).
+        // inside inherit the class (Bug #22).
         try Self.applyFileProtection(to: folder)
 
         let dbURL = folder.appendingPathComponent(fileName)
@@ -43,7 +41,7 @@ final class DatabaseManager {
         Self.applyFileProtectionToDatabaseFiles(at: dbURL)
         try Self.migrator.migrate(dbQueue)
 
-        // Migration/SQLite може да създаде или пресъздаде WAL/SHM файловете.
+        // Migrations can create or recreate the WAL/SHM files.
         Self.applyFileProtectionToDatabaseFiles(at: dbURL)
 
         #if DEBUG
@@ -62,61 +60,40 @@ final class DatabaseManager {
 
     private static func applyFileProtection(to url: URL) throws {
         try FileManager.default.setAttributes(
-            [
-                .protectionKey:
-                    FileProtectionType
-                        .completeUntilFirstUserAuthentication
-            ],
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
             ofItemAtPath: url.path
         )
     }
 
-    private static func applyFileProtectionToDatabaseFiles(
-        at dbURL: URL
-    ) {
+    private static func applyFileProtectionToDatabaseFiles(at dbURL: URL) {
         let fileManager = FileManager.default
-
-        for url in databaseFileURLs(dbURL)
-        where fileManager.fileExists(atPath: url.path) {
+        for url in databaseFileURLs(dbURL) where fileManager.fileExists(atPath: url.path) {
             do {
                 try applyFileProtection(to: url)
             } catch {
-                logger.error(
-                    """
+                logger.error("""
                     Couldn't apply file protection to \
                     \(url.lastPathComponent, privacy: .public): \
                     \(error.localizedDescription, privacy: .public)
-                    """
-                )
+                    """)
             }
         }
     }
 
     #if DEBUG
-    private static func assertFileProtectionCoversAllDatabaseFiles(
-        at dbURL: URL
-    ) {
+    private static func assertFileProtectionCoversAllDatabaseFiles(at dbURL: URL) {
         #if targetEnvironment(simulator)
-
-        // Simulator не моделира надеждно iOS Data Protection.
-        // protectionKey може да е nil дори след успешно setAttributes.
-        logger.debug(
-            "Skipping file-protection assertion in Simulator"
-        )
+        // The Simulator doesn't reliably model iOS Data Protection:
+        // `protectionKey` can read back nil even after a successful set.
+        logger.debug("Skipping file-protection assertion in Simulator")
         return
-
         #else
-
-        for url in databaseFileURLs(dbURL)
-        where FileManager.default.fileExists(atPath: url.path) {
+        for url in databaseFileURLs(dbURL) where FileManager.default.fileExists(atPath: url.path) {
             do {
-                let attributes = try FileManager.default
-                    .attributesOfItem(atPath: url.path)
-
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
                 let attribute = attributes[.protectionKey]
 
                 let protection: FileProtectionType?
-
                 if let value = attribute as? FileProtectionType {
                     protection = value
                 } else if let rawValue = attribute as? String {
@@ -126,34 +103,18 @@ final class DatabaseManager {
                 }
 
                 assert(
-                    protection
-                        == .completeUntilFirstUserAuthentication,
-                    """
-                    Unprotected database file: \
-                    \(url.lastPathComponent); \
-                    protection: \(String(describing: attribute))
-                    """
+                    protection == .completeUntilFirstUserAuthentication,
+                    "Unprotected database file: \(url.lastPathComponent); protection: \(String(describing: attribute))"
                 )
             } catch {
-                assertionFailure(
-                    """
-                    Could not inspect file protection for \
-                    \(url.lastPathComponent): \(error)
-                    """
-                )
+                assertionFailure("Could not inspect file protection for \(url.lastPathComponent): \(error)")
             }
         }
-
         #endif
     }
 
-    /// Guards against a mistake this project has already made once: a
-    /// migration shipped in its own file as a `register(in:)` function that
-    /// a comment asked the reader to wire up — and nobody did, so the
-    /// shipped schema silently kept the exact primary key that migration
-    /// existed to replace. Every migration since is written directly in
-    /// this file's `migrator`, and this list is a second, independent check
-    /// that catches a typo'd or accidentally-removed registration.
+    /// A second, independent check that catches a typo'd or
+    /// accidentally-removed migration registration.
     private static func assertExpectedMigrationsApplied(_ dbQueue: DatabaseQueue) throws {
         let applied = try dbQueue.read { db in try migrator.appliedIdentifiers(db) }
         for expected in expectedMigrationIdentifiers {
@@ -170,6 +131,7 @@ final class DatabaseManager {
         "v6_media_composite_primary_key",
         "v7_shared_note_pad",
         "v8_alarms",
+        "v9_receipts_presence_invites",
     ]
     #endif
 
@@ -480,18 +442,8 @@ final class DatabaseManager {
             )
         }
 
-        /// FIX (alarm): alarm storage.
-        ///
-        /// Composite-keyed `(ownerUserId, id)` from the start, like every
-        /// table designed after the v5/v6 account-isolation corrections.
-        ///
-        /// `accountabilityPeerId` deliberately carries **no** foreign key to
-        /// `users`. A cascade delete would silently remove an alarm when the
-        /// contact it points at is deleted, and an alarm disappearing
-        /// without warning is a worse failure than one that survives and
-        /// reports the problem — which is what
-        /// `AlarmRepository.clearMissingAccountabilityPeers` does instead,
-        /// downgrading the alarm to a task challenge so it stays usable.
+        /// Alarm storage. `accountabilityPeerId` deliberately has no foreign
+        /// key to `users` — a cascade would silently delete the alarm.
         migrator.registerMigration("v8_alarms") { db in
             try db.create(table: "alarms") { t in
                 t.column("ownerUserId", .text).notNull()
@@ -514,6 +466,46 @@ final class DatabaseManager {
                 index: "idx_alarms_owner_enabled",
                 on: "alarms",
                 columns: ["ownerUserId", "isEnabled"]
+            )
+        }
+
+        /// FIX (Pack 8): schema for receipts, profiles and invitations.
+        ///
+        /// Registered directly here — not left as a "remember to wire this up"
+        /// snippet, which is exactly how v6 once went missing.
+        ///
+        /// Schema only: the models don't declare these columns yet, which is
+        /// safe because GRDB ignores undeclared columns on read and inserts
+        /// fall back to the column defaults.
+        migrator.registerMigration("v9_receipts_presence_invites") { db in
+            // Receipts: nullable, not defaulted — "never delivered" and
+            // "delivered at epoch" are different facts.
+            try db.alter(table: "messages") { t in
+                t.add(column: "deliveredAt", .datetime)
+                t.add(column: "readAt", .datetime)
+            }
+
+            // Profiles: on the already per-account `users` table, so avatars
+            // inherit the same account isolation as pinned identity keys.
+            try db.alter(table: "users") { t in
+                t.add(column: "displayName", .text)
+                t.add(column: "avatarFileName", .text)
+                t.add(column: "profileUpdatedAt", .datetime)
+            }
+
+            // Invitations: defaults to 'accepted' so every existing
+            // conversation keeps working — treating them as pending would lock
+            // users out of their own history on upgrade.
+            try db.alter(table: "conversations") { t in
+                t.add(column: "relationshipState", .text).notNull().defaults(to: "accepted")
+                t.add(column: "inviteNote", .text)
+                t.add(column: "inviteSentAt", .datetime)
+                t.add(column: "inviteRespondedAt", .datetime)
+            }
+            try db.create(
+                index: "idx_conversations_owner_state",
+                on: "conversations",
+                columns: ["ownerUserId", "relationshipState"]
             )
         }
 

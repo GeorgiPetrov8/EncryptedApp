@@ -89,26 +89,43 @@ enum EnvelopeKind: String, Codable {
 /// instead of merely unreached: `asMessageContentType` below is the only
 /// bridge between the two, and it's `nil` for exactly the one case
 /// (`.notePad`) that should never reach message-row construction.
+/// Extends the envelope payload kinds with the control messages this pack adds.
+///
+/// Replaces the `EnvelopePayloadKind` from the notepad pack. Same design
+/// reasoning: these are *not* cases on `MessageContentType`, because none of
+/// them ever becomes a chat bubble, and adding them there would force every
+/// exhaustive switch over message content to handle states that cannot occur
+/// for a persisted message.
 enum EnvelopePayloadKind: String, Codable, Equatable {
     case text
     case image
     case video
     case file
-    /// A `NotePadOperation`, JSON-encoded then Double-Ratchet-encrypted —
-    /// merged into the shared pad, never shown as a chat bubble.
+    /// A `NotePadOperation`.
     case notePad
+    /// FIX (feature #3): a `ReceiptPayload` — delivered/read acknowledgement.
+    case receipt
+    /// FIX (feature #4): a `ProfilePayload` — display name and avatar.
+    case profile
+    /// FIX (feature #6): an `InvitePayload` — contact request or its answer.
+    case invite
 
-    /// The corresponding `MessageContentType`, or `nil` for `.notePad`
-    /// (which has none — there is no chat-message representation of a
-    /// notepad sync).
     var asMessageContentType: MessageContentType? {
         switch self {
         case .text: return .text
         case .image: return .image
         case .video: return .video
         case .file: return .file
-        case .notePad: return nil
+        case .notePad, .receipt, .profile, .invite: return nil
         }
+    }
+
+    /// Control payloads are merged into local state and never rendered in the
+    /// timeline. Grouping the test here keeps `handleIncoming` from growing a
+    /// long `if kind == .a || kind == .b ||` chain that someone forgets to
+    /// extend when a new kind is added.
+    var isControlMessage: Bool {
+        asMessageContentType == nil
     }
 }
 

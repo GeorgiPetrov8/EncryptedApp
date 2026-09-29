@@ -139,6 +139,66 @@ final class MessageRepository {
             }
         }
     }
+    
+    func markDelivered(
+        messageId: String,
+        ownerUserId: String,
+        at date: Date
+    ) throws {
+        try dbQueue.write { db in
+            guard var message = try Message.fetchOne(
+                db,
+                key: Self.key(ownerUserId: ownerUserId, id: messageId)
+            ) else {
+                return
+            }
+
+            message.deliveryStatus = .delivered
+            message.deliveredAt = date
+            try message.update(db)
+        }
+    }
+
+    func markDelivered(
+        messageIds: [String],
+        ownerUserId: String,
+        at date: Date
+    ) throws {
+        try dbQueue.write { db in
+            for messageId in messageIds {
+                guard var message = try Message.fetchOne(
+                    db,
+                    key: Self.key(ownerUserId: ownerUserId, id: messageId)
+                ) else {
+                    continue
+                }
+
+                message.deliveryStatus = .delivered
+                message.deliveredAt = date
+                try message.update(db)
+            }
+        }
+    }
+
+    func markRead(
+        messageIds: [String],
+        ownerUserId: String,
+        at date: Date
+    ) throws {
+        try dbQueue.write { db in
+            for messageId in messageIds {
+                guard var message = try Message.fetchOne(
+                    db,
+                    key: Self.key(ownerUserId: ownerUserId, id: messageId)
+                ) else {
+                    continue
+                }
+
+                message.readAt = date
+                try message.update(db)
+            }
+        }
+    }
 
     func fetchMessages(conversationId: String, ownerUserId: String) throws -> [Message] {
         try dbQueue.read { db in

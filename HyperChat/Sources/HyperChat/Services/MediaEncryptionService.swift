@@ -17,6 +17,7 @@ struct MediaKeyPayload: Codable {
     let mediaId: String
     let key: Data
     let thumbnailKey: Data?
+    let mediaType: MediaType
 }
 
 /// Handles encrypting media before "upload" and decrypting it back to
@@ -61,13 +62,63 @@ final class MediaEncryptionService {
         mediaType: MediaType,
         ownerUserId: String
     ) async throws -> PreparedMedia {
+        let inspection = AttachmentPolicy.inspect(
+            data: rawData,
+            declaredExtension: nil
+        )
+
+        guard case .success(let accepted) = inspection else {
+            if case .failure(let rejection) = inspection {
+                throw rejection
+            }
+
+            throw AttachmentPolicy.Rejection.unrecognisedFormat
+        }
+
+        let expectedMediaType: MediaType
+
+        switch accepted.category {
+        case .image:
+            expectedMediaType = .image
+
+        case .video:
+            expectedMediaType = .video
+
+        case .audio:
+            expectedMediaType = .audio
+
+        case .document:
+            expectedMediaType = .document
+        }
+
+        guard mediaType == expectedMediaType else {
+            throw AttachmentPolicy.Rejection.unrecognisedFormat
+        }
+
+        var encryptedThumbnail: Data?
+        var thumbnailKeyData: Data?
+        
+        if let thumbnail {
+            let thumbnailInspection = AttachmentPolicy.inspect(
+                data: thumbnail,
+                declaredExtension: "jpg"
+            )
+
+            guard case .success = thumbnailInspection else {
+                if case .failure(let rejection) = thumbnailInspection {
+                    throw rejection
+                }
+
+                throw AttachmentPolicy.Rejection.unrecognisedFormat
+            }
+        }
+        
         let fileKey = AESGCM.randomKey()
         let encryptedFile = try AESGCM.seal(plaintext: rawData, key: fileKey)
 
         let uploadResult = try await apiClient.uploadMedia(data: encryptedFile)
 
-        var encryptedThumbnail: Data?
-        var thumbnailKeyData: Data?
+        
         if let thumbnail {
             let thumbKey = AESGCM.randomKey()
             encryptedThumbnail = try AESGCM.seal(plaintext: thumbnail, key: thumbKey)
@@ -77,7 +128,8 @@ final class MediaEncryptionService {
         let payload = MediaKeyPayload(
             mediaId: uploadResult.mediaId,
             key: fileKey.withUnsafeBytes { Data($0) },
-            thumbnailKey: thumbnailKeyData
+            thumbnailKey: thumbnailKeyData,
+            mediaType: mediaType
         )
         let payloadData = try JSONEncoder().encode(payload)
 
@@ -130,10 +182,13 @@ final class MediaEncryptionService {
         payloadData: Data,
         messageId: String,
         ownerUserId: String,
-        mediaType: MediaType,
         createdAt: Date
     ) throws -> MediaItem {
-        let payload = try JSONDecoder().decode(MediaKeyPayload.self, from: payloadData)
+        let payload = try JSONDecoder().decode(
+            MediaKeyPayload.self,
+            from: payloadData
+        )
+
         let expectedURL = try cache.url(forMediaId: payload.mediaId)
 
         return MediaItem(
@@ -143,7 +198,7 @@ final class MediaEncryptionService {
             encryptedFilePath: expectedURL.path,
             encryptedThumbnail: nil,
             fileSize: 0,
-            mediaType: mediaType,
+            mediaType: payload.mediaType,
             createdAt: createdAt
         )
     }
@@ -169,6 +224,21 @@ final class MediaEncryptionService {
         let key = SymmetricKey(data: payload.key)
         let plaintext = try AESGCM.open(ciphertext: encryptedFile, key: key)
 
+        let inspection = AttachmentPolicy.inspect(
+            data: plaintext,
+            declaredExtension: nil
+        )
+
+        guard case .success = inspection else {
+            cache.remove(mediaId: payload.mediaId)
+
+            if case .failure(let rejection) = inspection {
+                throw rejection
+            }
+
+            throw AttachmentPolicy.Rejection.unrecognisedFormat
+        }
+        
         if let ownerUserId {
             // Now that the bytes exist, the provisional 0 from
             // `makeReceivedMediaItem` can be replaced with the real figure.

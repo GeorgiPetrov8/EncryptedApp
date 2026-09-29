@@ -17,43 +17,39 @@ final class NotePadViewModel: ObservableObject {
         notePadService.loadItems(for: conversation)
         items = notePadService.items(for: conversation.id)
 
-        // FIX (shared notepad): live updates.
-        //
-        // `NotePadService.itemsByConversation` changes whenever a remote
-        // operation arrives (`MessagingService.handleIncoming` →
-        // `applyRemoteOperation`) or a local one is applied
-        // (`NotePadService.apply`). Subscribing here, rather than requiring
-        // the view to poll or the parent `ChatView` to manually refresh it,
-        // is what makes a peer's checkbox toggle show up on this screen
-        // while it's open, the same way an incoming chat message appears
-        // in `ChatViewModel` without the user pulling to refresh.
+        // Live updates: `itemsByConversation` changes when a remote operation
+        // arrives or a local one is applied, so a peer ticking something off
+        // shows up while this screen is open.
         cancellable = notePadService.$itemsByConversation
             .map { $0[conversation.id] ?? [] }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.items = $0 }
+
+        // Re-sends anything that failed to transmit while offline. Safe to do
+        // on every open because the merge is idempotent — see
+        // `NotePadService.resyncOwnItems`.
+        Task { await notePadService.resyncOwnItems(in: conversation) }
     }
 
-    /// Non-deleted items, unfinished first.
-    ///
-    /// Finished items stay visible rather than being hidden or auto-purged:
-    /// for a shared buy/todo pad, "did we already get milk?" needs an
-    /// answer without scrolling back through chat history, which is the
-    /// whole reason this feature exists instead of just typing "buy milk"
-    /// as a normal message. Within each group, oldest-edited-first, so a
-    /// freshly re-ticked or re-added item doesn't jump to a surprising spot.
-    var visibleItems: [NotePadItem] {
-        items
-            .filter { !$0.isDeleted }
-            .sorted { lhs, rhs in
-                if lhs.isDone != rhs.isDone { return !lhs.isDone }
-                return lhs.updatedAt < rhs.updatedAt
-            }
+    private var liveItems: [NotePadItem] {
+        items.filter { !$0.isDeleted }
     }
 
-    var remainingCount: Int {
-        visibleItems.filter { !$0.isDone }.count
+    /// Kept separate rather than one sorted list, so the two groups can have
+    /// different delete affordances — see `NotePadView`.
+    var outstandingItems: [NotePadItem] {
+        liveItems.filter { !$0.isDone }.sorted { $0.updatedAt < $1.updatedAt }
     }
+
+    var completedItems: [NotePadItem] {
+        liveItems.filter(\.isDone).sorted { $0.updatedAt < $1.updatedAt }
+    }
+
+    /// Retained for the badge count in `ChatView`.
+    var visibleItems: [NotePadItem] { outstandingItems + completedItems }
+
+    var remainingCount: Int { outstandingItems.count }
 
     func addItem() {
         let text = newItemText
@@ -74,10 +70,22 @@ final class NotePadViewModel: ObservableObject {
         Task { await notePadService.deleteItem(item, in: conversation) }
     }
 
-    func delete(at offsets: IndexSet) {
-        let visible = visibleItems
-        for index in offsets {
-            delete(visible[index])
+    func deleteOutstanding(at offsets: IndexSet) {
+        let list = outstandingItems
+        for index in offsets where list.indices.contains(index) {
+            delete(list[index])
         }
+    }
+
+    func deleteCompleted(at offsets: IndexSet) {
+        let list = completedItems
+        for index in offsets where list.indices.contains(index) {
+            delete(list[index])
+        }
+    }
+
+    /// Bulk-clears finished items.
+    func deleteCompleted() {
+        for item in completedItems { delete(item) }
     }
 }

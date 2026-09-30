@@ -57,7 +57,13 @@ struct ConversationListView: View {
                         isSyncing: container.messagingService.isSyncing
                     )
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    NavigationLink {
+                        InvitationsView()
+                    } label: {
+                        Image(systemName: "person.crop.circle.badge.questionmark")
+                    }
+
                     Button {
                         showNewConversation = true
                     } label: {

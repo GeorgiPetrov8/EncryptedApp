@@ -11,6 +11,10 @@ struct ChatView: View {
     @StateObject private var viewModel: ChatViewModel
     @State private var showVerifyIdentity = false
     @State private var showNotePad = false
+    @State private var showAppearanceSettings = false
+    @State private var showCameraPicker = false
+    @State private var showDocumentPicker = false
+    @State private var showGIFPicker = false
 
     init(container: AppContainer, conversation: Conversation) {
         self.container = container
@@ -58,6 +62,49 @@ struct ChatView: View {
         // `@State` flags don't conflict with each other.
         .sheet(isPresented: $showNotePad) {
             NotePadView(container: container, conversation: viewModel.conversation)
+        }
+        .sheet(isPresented: $showAppearanceSettings) {
+            AppearanceSettingsView(
+                conversationId: viewModel.conversation.id
+            )
+        }
+        .sheet(isPresented: $showCameraPicker) {
+            CameraPicker(
+                onCaptured: { capture in
+                    showCameraPicker = false
+
+                    Task {
+                        await viewModel.sendCapturedMedia(capture)
+                    }
+                },
+                onCancelled: {
+                    showCameraPicker = false
+                }
+            )
+        }
+
+        .sheet(isPresented: $showDocumentPicker) {
+            DocumentPicker(
+                onPicked: { url in
+                    showDocumentPicker = false
+
+                    Task {
+                        await viewModel.sendDocument(from: url)
+                    }
+                },
+                onCancelled: {
+                    showDocumentPicker = false
+                }
+            )
+        }
+
+        .sheet(isPresented: $showGIFPicker) {
+            GIFPickerView { data in
+                Task {
+                    await viewModel.sendGIF(data)
+                }
+            }
+            .environmentObject(container)
         }
         .onAppear { viewModel.reloadPeer() }
     }
@@ -140,12 +187,28 @@ struct ChatView: View {
             selectedPhotoItem: $viewModel.selectedPhotoItem,
             isSending: viewModel.isSending,
             isSendingMedia: viewModel.isSendingMedia,
-            isDisabled: viewModel.peerIdentityChanged
-        ) {
-            Task { await viewModel.send() }
-        }
+            isDisabled: viewModel.peerIdentityChanged,
+            onSend: {
+                Task {
+                    await viewModel.send()
+                }
+            },
+            onCamera: {
+                showCameraPicker = true
+            },
+            onDocument: {
+                showDocumentPicker = true
+            },
+            onGIF: {
+                showGIFPicker = true
+            },
+            onVoiceFinished: { voiceMessage in
+                Task {
+                    await viewModel.sendVoiceMessage(voiceMessage)
+                }
+            }
+        )
     }
-
     // MARK: Toolbar
 
     @ToolbarContentBuilder
@@ -155,6 +218,14 @@ struct ChatView: View {
         }
         ToolbarItem(placement: .navigationBarTrailing) {
             verifyIdentityButton
+        }
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Button {
+                showAppearanceSettings = true
+            } label: {
+                Image(systemName: "paintbrush")
+            }
+            .accessibilityLabel("Chat appearance")
         }
     }
 
@@ -301,11 +372,19 @@ private struct IdentityChangedBanner: View {
 private struct MessageInputBar: View {
     @Binding var text: String
     @Binding var selectedPhotoItem: PhotosPickerItem?
+    
+    @StateObject private var voiceRecorder = VoiceRecorder()
+
     let isSending: Bool
     let isSendingMedia: Bool
     let isDisabled: Bool
-    let onSend: () -> Void
 
+    let onSend: () -> Void
+    let onCamera: () -> Void
+    let onDocument: () -> Void
+    let onGIF: () -> Void
+    let onVoiceFinished: (RecordedVoiceMessage) -> Void
+    
     var body: some View {
         VStack(spacing: 0) {
             sendingIndicator
@@ -319,7 +398,8 @@ private struct MessageInputBar: View {
         if isSendingMedia {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
-                Text("Sending photo…").font(.caption2)
+                Text("Sending attachment…")
+                    .font(.caption2)
                 Spacer()
             }
             .foregroundStyle(.secondary)
@@ -330,21 +410,38 @@ private struct MessageInputBar: View {
 
     private var controls: some View {
         HStack(spacing: 8) {
-            photoPicker
-            textField
-            sendButton
+            attachmentMenu
+
+            if voiceRecorder.isRecording {
+                VoiceRecordingBar(recorder: voiceRecorder)
+                    .frame(maxWidth: .infinity)
+            } else {
+                textField
+
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    voiceButton
+                } else {
+                    sendButton
+                }
+            }
         }
         .padding()
     }
 
-    private var photoPicker: some View {
-        PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-            Image(systemName: "paperclip")
-                .font(.title3)
-                .foregroundStyle(attachmentTint)
-        }
-        .disabled(isDisabled || isSendingMedia)
-        .accessibilityLabel("Attach photo")
+    private var attachmentMenu: some View {
+        AttachmentMenu(
+            selectedPhotoItem: $selectedPhotoItem,
+            isDisabled: isDisabled || isSendingMedia,
+            onCamera: {
+                onCamera()
+            },
+            onDocument: {
+                onDocument()
+            },
+            onGIF: {
+                onGIF()
+            }
+        )
     }
 
     /// Hoisted out of the view builder: inline, the ternary had to infer a
@@ -371,6 +468,14 @@ private struct MessageInputBar: View {
             sendButtonLabel
         }
         .disabled(isSendDisabled)
+    }
+    
+    private var voiceButton: some View {
+        VoiceRecordButton(
+            recorder: voiceRecorder,
+            isDisabled: isDisabled || isSending || isSendingMedia,
+            onFinished: onVoiceFinished
+        )
     }
 
     @ViewBuilder

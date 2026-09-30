@@ -8,8 +8,13 @@ struct DisplayMessage: Identifiable {
     let isMine: Bool
     let text: String
     let contentType: MessageContentType
+    let mediaType: MediaType?
+    let voiceDuration: TimeInterval?
+    let voiceWaveform: [Float]?
     let status: DeliveryStatus
     let createdAt: Date
+    let deliveredAt: Date?
+    let readAt: Date?
 }
 
 @MainActor
@@ -112,15 +117,20 @@ final class ChatViewModel: ObservableObject {
                 uniqueKeysWithValues: stored.map { ($0.id, $0) }
             )
             messages = stored.map { message in
-                DisplayMessage(
+                let mediaMetadata = messagingService.mediaDisplayMetadata(for: message)
+
+                return DisplayMessage(
                     id: message.id,
                     isMine: message.senderId == myUserId,
-                    // FIX (Bug #18): shared helper, so the bubble and the list summary
-                    // can never disagree about how a media message is rendered.
                     text: messagingService.previewText(for: message),
                     contentType: message.contentType,
+                    mediaType: mediaMetadata?.mediaType,
+                    voiceDuration: mediaMetadata?.duration,
+                    voiceWaveform: mediaMetadata?.waveform,
                     status: message.deliveryStatus,
-                    createdAt: message.createdAt
+                    createdAt: message.createdAt,
+                    deliveredAt: message.deliveredAt,
+                    readAt: message.readAt
                 )
             }
         } catch {
@@ -194,6 +204,149 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    func sendCapturedMedia(_ capture: CameraPicker.Capture) async {
+        guard !peerIdentityChanged else {
+            errorMessage = IdentityError
+                .identityChangeUnacknowledged(userId: peerId ?? "")
+                .localizedDescription
+            return
+        }
+
+        isSendingMedia = true
+        defer {
+            isSendingMedia = false
+        }
+
+        do {
+            switch capture {
+            case .photo(let data):
+                try await messagingService.sendMedia(
+                    rawData: data,
+                    thumbnail: nil,
+                    mediaType: .image,
+                    in: conversation
+                )
+
+            case .video(let url):
+                let data = try Data(contentsOf: url)
+
+                try await messagingService.sendMedia(
+                    rawData: data,
+                    thumbnail: nil,
+                    mediaType: .video,
+                    in: conversation
+                )
+            }
+
+            reload()
+
+        } catch let identityError as IdentityError {
+            reloadPeer()
+            errorMessage = identityError.localizedDescription
+
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func sendDocument(from url: URL) async {
+        guard !peerIdentityChanged else {
+            errorMessage = IdentityError
+                .identityChangeUnacknowledged(userId: peerId ?? "")
+                .localizedDescription
+            return
+        }
+
+        isSendingMedia = true
+        defer {
+            isSendingMedia = false
+        }
+
+        do {
+            let data = try Data(contentsOf: url)
+
+            try await messagingService.sendMedia(
+                rawData: data,
+                thumbnail: nil,
+                mediaType: .document,
+                in: conversation
+            )
+
+            reload()
+
+        } catch let identityError as IdentityError {
+            reloadPeer()
+            errorMessage = identityError.localizedDescription
+
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func sendGIF(_ data: Data) async {
+        guard !peerIdentityChanged else {
+            errorMessage = IdentityError
+                .identityChangeUnacknowledged(userId: peerId ?? "")
+                .localizedDescription
+            return
+        }
+
+        isSendingMedia = true
+        defer {
+            isSendingMedia = false
+        }
+
+        do {
+            try await messagingService.sendMedia(
+                rawData: data,
+                thumbnail: nil,
+                mediaType: .image,
+                in: conversation
+            )
+
+            reload()
+
+        } catch let identityError as IdentityError {
+            reloadPeer()
+            errorMessage = identityError.localizedDescription
+
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+    
+    func sendVoiceMessage(_ voiceMessage: RecordedVoiceMessage) async {
+        guard !peerIdentityChanged else {
+            errorMessage = IdentityError
+                .identityChangeUnacknowledged(userId: peerId ?? "")
+                .localizedDescription
+            return
+        }
+
+        isSendingMedia = true
+        defer {
+            isSendingMedia = false
+        }
+
+        do {
+            try await messagingService.sendMedia(
+                rawData: voiceMessage.data,
+                thumbnail: nil,
+                mediaType: .audio,
+                duration: voiceMessage.duration,
+                waveform: voiceMessage.normalisedWaveform(),
+                in: conversation
+            )
+
+            reload()
+        } catch let identityError as IdentityError {
+            reloadPeer()
+            errorMessage = identityError.localizedDescription
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+    
     func send() async {
         let text = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }

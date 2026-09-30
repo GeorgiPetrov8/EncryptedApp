@@ -18,6 +18,11 @@ struct MediaKeyPayload: Codable {
     let key: Data
     let thumbnailKey: Data?
     let mediaType: MediaType
+
+    // Voice-message metadata.
+    // nil for images, videos and documents.
+    let duration: TimeInterval?
+    let waveform: [Float]?
 }
 
 /// Handles encrypting media before "upload" and decrypting it back to
@@ -60,6 +65,8 @@ final class MediaEncryptionService {
         rawData: Data,
         thumbnail: Data?,
         mediaType: MediaType,
+        duration: TimeInterval? = nil,
+        waveform: [Float]? = nil,
         ownerUserId: String
     ) async throws -> PreparedMedia {
         let inspection = AttachmentPolicy.inspect(
@@ -93,6 +100,16 @@ final class MediaEncryptionService {
 
         guard mediaType == expectedMediaType else {
             throw AttachmentPolicy.Rejection.unrecognisedFormat
+        }
+        
+        if mediaType == .audio {
+            guard let duration, duration > 0 else {
+                throw AttachmentPolicy.Rejection.unrecognisedFormat
+            }
+
+            guard let waveform, !waveform.isEmpty else {
+                throw AttachmentPolicy.Rejection.unrecognisedFormat
+            }
         }
 
         var encryptedThumbnail: Data?
@@ -129,7 +146,9 @@ final class MediaEncryptionService {
             mediaId: uploadResult.mediaId,
             key: fileKey.withUnsafeBytes { Data($0) },
             thumbnailKey: thumbnailKeyData,
-            mediaType: mediaType
+            mediaType: mediaType,
+            duration: mediaType == .audio ? duration : nil,
+            waveform: mediaType == .audio ? waveform : nil
         )
         let payloadData = try JSONEncoder().encode(payload)
 

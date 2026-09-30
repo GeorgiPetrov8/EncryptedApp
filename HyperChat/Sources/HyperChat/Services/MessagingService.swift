@@ -35,6 +35,12 @@ enum ReceiveError: LocalizedError, Equatable {
     }
 }
 
+struct MediaDisplayMetadata {
+    let mediaType: MediaType
+    let duration: TimeInterval?
+    let waveform: [Float]?
+}
+
 /// Orchestrates everything needed to send and receive end-to-end encrypted messages.
 @MainActor
 final class MessagingService: ObservableObject {
@@ -554,6 +560,8 @@ final class MessagingService: ObservableObject {
         rawData: Data,
         thumbnail: Data?,
         mediaType: MediaType,
+        duration: TimeInterval? = nil,
+        waveform: [Float]? = nil,
         in conversation: Conversation
     ) async throws {
         guard let myUserId = authService.currentUserId else { throw APIError.notAuthenticated }
@@ -562,6 +570,8 @@ final class MessagingService: ObservableObject {
             rawData: rawData,
             thumbnail: thumbnail,
             mediaType: mediaType,
+            duration: duration,
+            waveform: waveform,
             ownerUserId: myUserId
         )
 
@@ -906,6 +916,35 @@ final class MessagingService: ObservableObject {
 
     // MARK: Display
 
+    func mediaDisplayMetadata(for message: Message) -> MediaDisplayMetadata? {
+        guard message.carriesMediaPayload else {
+            return nil
+        }
+
+        guard !message.isUndecryptable else {
+            return nil
+        }
+
+        guard let payloadData = try? cryptoService.decryptFromStorage(
+            message.encryptedContent
+        ) else {
+            return nil
+        }
+
+        guard let payload = try? JSONDecoder().decode(
+            MediaKeyPayload.self,
+            from: payloadData
+        ) else {
+            return nil
+        }
+
+        return MediaDisplayMetadata(
+            mediaType: payload.mediaType,
+            duration: payload.duration,
+            waveform: payload.waveform
+        )
+    }
+    
     func displayText(for message: Message) -> String {
         if message.isUndecryptable {
             return "⚠️ This message couldn't be decrypted"

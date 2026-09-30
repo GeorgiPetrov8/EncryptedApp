@@ -35,6 +35,7 @@ targets:
           - UIInterfaceOrientationPortrait
         NSCameraUsageDescription: "HyperChat needs camera access to capture photos and videos to send in encrypted messages."
         NSPhotoLibraryUsageDescription: "HyperChat needs photo library access to attach images and videos to encrypted messages."
+        NSMicrophoneUsageDescription: "HyperChat needs microphone access to record voice messages."
         NSFaceIDUsageDescription: "HyperChat uses Face ID to protect access to your conversations."
         API_BASE_URL: "$(API_BASE_URL)"
         USE_MOCK_BACKEND: "$(USE_MOCK_BACKEND)"

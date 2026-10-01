@@ -1,0 +1,78 @@
+version: "3.8"
+
+# Two services: the relay itself, and Caddy in front of it for automatic
+# TLS. Caddy is the pragmatic choice for a minimal deployment — point a
+# domain's DNS at the box and it provisions and renews a Let's Encrypt
+# certificate with zero manual steps, unlike nginx/certbot which needs its
+# own cron job and initial bootstrap dance.
+#
+# For local development you don't need Caddy at all: run `npm start`
+# directly (or `docker compose up server`) and point the client's
+# `API_BASE_URL` at `http://127.0.0.1:8080` — see project.yml's Debug
+# configuration, which already does this.
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - DB_PATH=/app/data/securechat.sqlite
+      # Only set this once Caddy (or another reverse proxy) is actually in
+      # front of this service — see the warning on TRUST_PROXY in
+      # src/rateLimit.js. Never set it if the server is reachable directly.
+      - TRUST_PROXY=1
+    volumes:
+      - securechat-data:/app/data
+    expose:
+      - "8080"
+    # No `ports:` mapping to the host — only Caddy talks to this service
+    # directly, on the Docker-internal network. Uncomment the next two
+    # lines instead if you want to skip Caddy entirely (e.g. behind an
+    # existing load balancer that already terminates TLS):
+    # ports:
+    #   - "8080:8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - server
+
+  # --- Migrating to Postgres --------------------------------------------
+  # This scaffold ships SQLite (via Node's built-in `node:sqlite`) because
+  # it needs zero extra services to run and is already a real, durable,
+  # file-backed database — a strict upgrade over MockBackendStore's
+  # in-memory Dictionary. If you outgrow a single-instance server (multiple
+  # server processes needing to share state, or you want managed backups /
+  # replication), add Postgres here:
+  #
+  # postgres:
+  #   image: postgres:16-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     - POSTGRES_DB=securechat
+  #     - POSTGRES_USER=securechat
+  #     - POSTGRES_PASSWORD=change-me
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   expose:
+  #     - "5432"
+  #
+  # ...and rewrite src/db.js's `Store` class against `pg` (or `postgres.js`)
+  # behind the exact same method names (`registerAccount`, `popOneTimePreKey`,
+  # etc.) it exposes today. Nothing in server.js or src/routes/*.js is
+  # SQLite-specific — they only ever call `store.stmt.*` / the transaction
+  # helper, so the migration is contained entirely to that one file.
+
+volumes:
+  securechat-data:
+  caddy-data:
+  caddy-config:

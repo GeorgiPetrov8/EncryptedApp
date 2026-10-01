@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Pending contact requests (feature #6).
+/// Pending contact requests.
 struct InvitationsView: View {
     @EnvironmentObject private var container: AppContainer
 
@@ -36,18 +36,21 @@ private struct InvitationRow: View {
     let onDecline: () -> Void
 
     @State private var contact: User?
+    @State private var isWorking = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 AvatarView(
-                    userId: contact?.id ?? "",
+                    userId: peerId ?? "",
                     displayName: displayName,
-                    imageData: nil,
+                    imageData: peerId.flatMap { container.profileService.avatarData(for: $0) },
                     size: 44
                 )
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(displayName).font(.headline)
+                    Text(displayName)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
                     if let sentAt = conversation.inviteSentAt {
                         Text(sentAt, style: .relative) + Text(" ago")
                     }
@@ -65,21 +68,27 @@ private struct InvitationRow: View {
             }
 
             HStack(spacing: 10) {
-                Button(action: onAccept) {
+                Button {
+                    isWorking = true
+                    onAccept()
+                } label: {
                     Text("Accept").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
 
-                Button(action: onDecline) {
+                Button(role: .destructive) {
+                    isWorking = true
+                    onDecline()
+                } label: {
                     Text("Decline").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
             }
+            // Bordered styles (not plain) matter here: in a List, two plain
+            // buttons in one row both fire on any tap.
+            .disabled(isWorking)
 
-            // Stated plainly, because the security value of the invite gate
-            // depends on the user understanding that accepting is what opens
-            // the channel — not something that already happened.
-            Text("They can't message you until you accept.")
+            Text("They can't message or call you until you accept.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -87,16 +96,18 @@ private struct InvitationRow: View {
         .onAppear(perform: loadContact)
     }
 
+    private var peerId: String? {
+        guard let myUserId = container.authService.currentUserId else { return nil }
+        return conversation.otherParticipant(myUserId: myUserId)
+    }
+
     private var displayName: String {
-        if let contact, !contact.username.isEmpty { return contact.username }
-        guard let myUserId = container.authService.currentUserId,
-              let peerId = conversation.otherParticipant(myUserId: myUserId) else { return "Unknown" }
-        return String(peerId.prefix(8))
+        if let contact { return contact.shownName }
+        return String((peerId ?? "Unknown").prefix(8))
     }
 
     private func loadContact() {
-        guard let myUserId = container.authService.currentUserId,
-              let peerId = conversation.otherParticipant(myUserId: myUserId) else { return }
+        guard let myUserId = container.authService.currentUserId, let peerId else { return }
         contact = try? container.userRepository.fetch(ownerUserId: myUserId, id: peerId)
     }
 }
@@ -111,27 +122,27 @@ struct NewInvitationView: View {
     @State private var isSending = false
     @State private var errorMessage: String?
 
-    /// Handed the created conversation so the caller can navigate straight
-    /// into it — the chat exists immediately, which is the point of the
-    /// feature.
+    /// Handed the created conversation so the caller can open it straight away
+    /// — the chat exists immediately for the sender.
     let onInvited: (Conversation) -> Void
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Who") {
+                Section {
                     TextField("Username", text: $username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                } header: {
+                    Text("Who")
+                } footer: {
+                    Text("They'll get an invitation. Once they accept, your chat opens for both of you — anything you write before that is sent then.")
                 }
 
                 Section {
                     TextField("Optional note", text: $note, axis: .vertical)
                         .lineLimit(2...4)
                         .onChange(of: note) { _, newValue in
-                            // Enforced here as well as in the payload, so the
-                            // limit is visible rather than silently truncating
-                            // on send.
                             if newValue.count > InviteLimits.maxNoteLength {
                                 note = String(newValue.prefix(InviteLimits.maxNoteLength))
                             }
@@ -139,7 +150,7 @@ struct NewInvitationView: View {
                 } header: {
                     Text("Note")
                 } footer: {
-                    Text("\(note.count)/\(InviteLimits.maxNoteLength) — a short note helps them recognise you. They'll see this before deciding.")
+                    Text("\(note.count)/\(InviteLimits.maxNoteLength) — helps them recognise you.")
                 }
 
                 if let errorMessage {
@@ -166,6 +177,7 @@ struct NewInvitationView: View {
 
     private func send() {
         isSending = true
+        errorMessage = nil
         Task {
             defer { isSending = false }
             do {
@@ -174,7 +186,6 @@ struct NewInvitationView: View {
                     note: note.isEmpty ? nil : note
                 )
                 onInvited(conversation)
-                dismiss()
             } catch {
                 errorMessage = error.localizedDescription
             }

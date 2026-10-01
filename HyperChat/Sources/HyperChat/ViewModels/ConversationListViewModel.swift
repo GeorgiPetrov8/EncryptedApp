@@ -3,25 +3,26 @@ import Combine
 
 struct ConversationSummary: Identifiable {
     let conversation: Conversation
+    let peerId: String
     let otherUsername: String
     let lastMessagePreview: String
     let lastActivityAt: Date?
     let isVerified: Bool
     let hasIdentityWarning: Bool
+    let relationshipState: RelationshipState
     var id: String { conversation.id }
 }
 
 @MainActor
 final class ConversationListViewModel: ObservableObject {
     @Published private(set) var summaries: [ConversationSummary] = []
-    @Published var newConversationUsername = ""
     @Published var errorMessage: String?
-    @Published var isStartingConversation = false
 
     private let conversationRepository: ConversationRepository
     private let messageRepository: MessageRepository
     private let userRepository: UserRepository
     private let messagingService: MessagingService
+    private let invitationService: InvitationService
     private let authService: AuthService
     private var cancellables = Set<AnyCancellable>()
 
@@ -30,16 +31,28 @@ final class ConversationListViewModel: ObservableObject {
         messageRepository: MessageRepository,
         userRepository: UserRepository,
         messagingService: MessagingService,
+        invitationService: InvitationService,
         authService: AuthService
     ) {
         self.conversationRepository = conversationRepository
         self.messageRepository = messageRepository
         self.userRepository = userRepository
         self.messagingService = messagingService
+        self.invitationService = invitationService
         self.authService = authService
 
         messagingService.$incomingMessage
             .compactMap { $0 }
+            .sink { [weak self] _ in self?.reload() }
+            .store(in: &cancellables)
+
+        // FIX (invitations): invitation changes (sent, accepted, declined)
+        // aren't incoming messages, so the list needs its own trigger.
+        invitationService.changes
+            .sink { [weak self] _ in self?.reload() }
+            .store(in: &cancellables)
+
+        messagingService.conversationChanged
             .sink { [weak self] _ in self?.reload() }
             .store(in: &cancellables)
     }
@@ -47,30 +60,27 @@ final class ConversationListViewModel: ObservableObject {
     func reload() {
         guard let myUserId = authService.currentUserId else { return }
         do {
-            // Scoped to the signed-in account (Bug #10) and ordered by real activity
-            // rather than creation date (Bug #15).
             let conversations = try conversationRepository.fetchAllSortedByRecentActivity(ownerUserId: myUserId)
+                // Requests you haven't answered live in Invitations, not here.
+                .filter { $0.relationshipState != .invitedByThem }
+
             summaries = try conversations.map { conversation in
                 let peerId = conversation.otherParticipant(myUserId: myUserId) ?? ""
-                // FIX: contact lookups are scoped to the owning account now that
-                // `users` is keyed by `(ownerUserId, id)`.
                 let peer = peerId.isEmpty ? nil : try userRepository.fetch(ownerUserId: myUserId, id: peerId)
                 let last = try messageRepository.latestMessage(
                     conversationId: conversation.id,
                     ownerUserId: myUserId
                 )
 
-                // `previewText`, not `plaintext` — a media message's body is a
-                // key-bearing JSON payload and must never be rendered (Bug #18).
-                let preview = last.map { messagingService.previewText(for: $0) } ?? "No messages yet"
-
                 return ConversationSummary(
                     conversation: conversation,
+                    peerId: peerId,
                     otherUsername: displayName(for: peer, peerId: peerId),
-                    lastMessagePreview: preview,
-                    lastActivityAt: last?.createdAt ?? conversation.lastMessageAt,
+                    lastMessagePreview: preview(for: conversation, last: last),
+                    lastActivityAt: last?.createdAt ?? conversation.lastMessageAt ?? conversation.inviteSentAt,
                     isVerified: peer?.isVerified ?? false,
-                    hasIdentityWarning: peer?.hasUnacknowledgedIdentityChange ?? false
+                    hasIdentityWarning: peer?.hasUnacknowledgedIdentityChange ?? false,
+                    relationshipState: conversation.relationshipState
                 )
             }
         } catch {
@@ -78,26 +88,23 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
-    /// A shortened id as the last resort rather than a blanket "Unknown" (Bug #11).
-    private func displayName(for peer: User?, peerId: String) -> String {
-        if let peer, !peer.username.isEmpty { return peer.username }
-        guard !peerId.isEmpty else { return "Unknown contact" }
-        return String(peerId.prefix(8))
+    private func preview(for conversation: Conversation, last: Message?) -> String {
+        switch conversation.relationshipState {
+        case .invitedByMe:
+            guard let last else { return "Invitation sent" }
+            return "Waiting for acceptance · \(messagingService.previewText(for: last))"
+        case .declined:
+            return "Invitation declined"
+        case .accepted, .invitedByThem:
+            // `previewText`, not `plaintext` — a media message's body is a
+            // key-bearing JSON payload and must never be rendered (Bug #18).
+            return last.map { messagingService.previewText(for: $0) } ?? "No messages yet"
+        }
     }
 
-    func startConversation() async -> Conversation? {
-        let username = newConversationUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !username.isEmpty else { return nil }
-        isStartingConversation = true
-        defer { isStartingConversation = false }
-        do {
-            let conversation = try await messagingService.startConversation(withUsername: username)
-            newConversationUsername = ""
-            reload()
-            return conversation
-        } catch {
-            errorMessage = error.localizedDescription
-            return nil
-        }
+    private func displayName(for peer: User?, peerId: String) -> String {
+        if let peer { return peer.shownName }
+        guard !peerId.isEmpty else { return "Unknown contact" }
+        return String(peerId.prefix(8))
     }
 }

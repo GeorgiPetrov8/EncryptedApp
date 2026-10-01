@@ -3,9 +3,8 @@ import PhotosUI
 
 /// Picks a background, either globally or for one conversation.
 ///
-/// Shows a live preview with real bubbles rather than a colour swatch, because
-/// the thing the user actually needs to judge is "can I read my messages on
-/// this", which a swatch doesn't answer.
+/// Shows a live preview with real bubbles, because what the user needs to
+/// judge is "can I read my messages on this", which a swatch doesn't answer.
 struct AppearanceSettingsView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
@@ -60,13 +59,11 @@ struct AppearanceSettingsView: View {
                 if case .image = draft.background {
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Dimming")
+                            Text("Dimming \(Int(dimming * 100))%")
                                 .font(.subheadline)
-                            Slider(value: $draft.bubbleOpacity, in: 0...0.5)
+                            Slider(value: dimmingBinding, in: ContrastPolicy.minimumDarkScrimOpacity...0.9)
                         }
                     } footer: {
-                        // Explains why the slider refuses to go to zero, which
-                        // otherwise reads as a bug rather than a guardrail.
                         Text("Photos are dimmed so message text stays readable. The minimum dimming can't be removed — over a bright photo, undimmed text becomes unreadable.")
                     }
                 }
@@ -107,6 +104,22 @@ struct AppearanceSettingsView: View {
         }
     }
 
+    // MARK: Dimming
+    //
+    // FIX: the slider used to be bound straight to `bubbleOpacity`, while the
+    // scrim actually drawn is `max(floor, 1 - bubbleOpacity)`. Dragging right
+    // therefore *reduced* dimming, and most of the range did nothing because
+    // it sat below the floor. It now edits the effective dimming directly.
+
+    private var dimming: Double { draft.effectiveScrimOpacity }
+
+    private var dimmingBinding: Binding<Double> {
+        Binding(
+            get: { draft.effectiveScrimOpacity },
+            set: { draft.bubbleOpacity = 1 - $0 }
+        )
+    }
+
     // MARK: Preview
 
     private var preview: some View {
@@ -140,9 +153,6 @@ struct AppearanceSettingsView: View {
 
     // MARK: Contrast readout
 
-    /// Shown because the auto-contrast rule is invisible otherwise — a user who
-    /// drags the sliders sees the text colour flip from black to white at the
-    /// midpoint and deserves to know that was deliberate, not a glitch.
     private var contrastReadout: some View {
         let luminance = ContrastPolicy.relativeLuminance(red: red, green: green, blue: blue)
         let textLuminance: Double = draft.prefersLightForeground ? 1.0 : 0.0
@@ -188,16 +198,14 @@ struct AppearanceSettingsView: View {
 
     private func importPhoto(_ item: PhotosPickerItem) async {
         do {
-            guard let data = try await item.loadTransferable(type: Data.self) else { return }
-            // Reuses the message-attachment downsampler: a full-resolution
-            // photo as a wallpaper is a waste of disk and of decode time on
-            // every chat open.
-            guard let prepared = try? await PhotoAttachmentLoader.loadAndPrepare(item) else {
-                let fileName = try store.saveBackgroundImage(data)
-                draft.background = .image(fileName: fileName)
+            let fileName: String
+            if let prepared = try? await PhotoAttachmentLoader.loadAndPrepare(item) {
+                fileName = try store.saveBackgroundImage(prepared.imageData)
+            } else if let data = try await item.loadTransferable(type: Data.self) {
+                fileName = try store.saveBackgroundImage(data)
+            } else {
                 return
             }
-            let fileName = try store.saveBackgroundImage(prepared.imageData)
             draft.background = .image(fileName: fileName)
         } catch {
             errorMessage = "Couldn't use that photo: \(error.localizedDescription)"

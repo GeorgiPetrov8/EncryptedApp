@@ -1,13 +1,13 @@
 {
-  "originHash" : "c13633499a710cb1c095bf4854a3fdcf835d998dc633782e3d88552d210af01f",
+  "originHash" : "2df6280486a953f9a24c0168cd748e29d7eb8ce422bcacebb5e9e2b4367d9654",
   "pins" : [
     {
-      "identity" : "grdb.swift?utm_source=chatgpt.com",
+      "identity" : "grdb.swift",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/groue/GRDB.swift?utm_source=chatgpt.com",
+      "location" : "https://github.com/groue/GRDB.swift.git",
       "state" : {
-        "branch" : "master",
-        "revision" : "0d8cf958b4b66a0473ec6e6986eb9da462171da9"
+        "revision" : "2cf6c756e1e5ef6901ebae16576a7e4e4b834622",
+        "version" : "6.29.3"
       }
     }
   ],

@@ -5,10 +5,10 @@ import AVFoundation
 import WebRTC
 #endif
 
-/// Full-screen call UI (feature: calls and screen sharing).
+/// Full-screen call UI. Presented by `ConversationListView` whenever a call is
+/// in progress, so it appears no matter which screen you're on.
 struct CallView: View {
     @EnvironmentObject private var container: AppContainer
-    let peerName: String
 
     private var service: CallService { container.callService }
 
@@ -17,10 +17,20 @@ struct CallView: View {
             Color.black.ignoresSafeArea()
 
             remoteVideo
+            localPreview
 
             VStack {
                 header
                 Spacer()
+                if let error = service.errorMessage {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(10)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(.bottom, 12)
+                }
                 controls
             }
             .padding()
@@ -30,10 +40,21 @@ struct CallView: View {
             }
         }
         .preferredColorScheme(.dark)
-        // Calls keep the screen awake — nothing else in the app does, so this
-        // is scoped to the call rather than set globally.
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    // MARK: Peer
+
+    private var peerId: String? { service.activePeerId }
+
+    private var peer: User? {
+        guard let me = container.authService.currentUserId, let peerId else { return nil }
+        return try? container.userRepository.fetch(ownerUserId: me, id: peerId)
+    }
+
+    private var peerName: String {
+        peer?.shownName ?? String((peerId ?? "").prefix(8))
     }
 
     // MARK: Video
@@ -41,8 +62,8 @@ struct CallView: View {
     @ViewBuilder
     private var remoteVideo: some View {
         #if canImport(WebRTC)
-        if service.remoteIsVideoEnabled || service.remoteIsScreenSharing {
-            RTCVideoView(isScreenShare: service.remoteIsScreenSharing)
+        if (service.remoteIsVideoEnabled || service.remoteIsScreenSharing), let track = service.remoteVideoTrack {
+            RTCVideoView(track: track, isScreenShare: service.remoteIsScreenSharing)
                 .ignoresSafeArea()
         } else {
             audioOnlyBackdrop
@@ -50,29 +71,36 @@ struct CallView: View {
         #else
         audioOnlyBackdrop
         #endif
+    }
 
-        // Local preview, picture-in-picture. Mirrored, because an unmirrored
-        // self-view feels wrong to everyone who has ever used a mirror.
-        if service.isVideoEnabled {
+    @ViewBuilder
+    private var localPreview: some View {
+        #if canImport(WebRTC)
+        if service.isVideoEnabled, let track = service.localVideoTrack {
             VStack {
                 HStack {
                     Spacer()
-                    #if canImport(WebRTC)
-                    RTCVideoView(isLocal: true)
+                    RTCVideoView(track: track, isLocal: true)
                         .frame(width: 100, height: 140)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.2)))
-                        .padding()
-                    #endif
+                        .padding(.top, 50)
                 }
                 Spacer()
             }
+            .padding()
         }
+        #endif
     }
 
     private var audioOnlyBackdrop: some View {
         VStack(spacing: 16) {
-            AvatarView(userId: peerName, displayName: peerName, imageData: nil, size: 120)
+            AvatarView(
+                userId: peerId ?? peerName,
+                displayName: peerName,
+                imageData: peerId.flatMap { container.profileService.avatarData(for: $0) },
+                size: 120
+            )
             Text(peerName).font(.title2.bold()).foregroundStyle(.white)
         }
     }
@@ -84,9 +112,15 @@ struct CallView: View {
             Text(peerName)
                 .font(.headline)
                 .foregroundStyle(.white)
-            Text(statusText)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
+
+            // FIX: the elapsed time never ticked — nothing re-rendered the view
+            // once a second. `TimelineView` does.
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text(statusText)
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.7))
+            }
 
             if service.remoteIsScreenSharing {
                 Label("Sharing their screen", systemImage: "rectangle.inset.filled.on.rectangle")
@@ -102,7 +136,7 @@ struct CallView: View {
     private var statusText: String {
         switch service.phase {
         case .idle: return ""
-        case .outgoing: return "Calling…"
+        case .outgoing(_, let isVideo): return isVideo ? "Video calling…" : "Calling…"
         case .incoming(_, let isVideo, _): return isVideo ? "Incoming video call" : "Incoming call"
         case .connecting: return "Connecting…"
         case .active:
@@ -124,32 +158,36 @@ struct CallView: View {
 
     @ViewBuilder
     private var controls: some View {
-        if case .incoming = service.phase {
-            EmptyView() // the incoming overlay owns the buttons
-        } else {
-            HStack(spacing: 24) {
+        switch service.phase {
+        case .incoming, .ended, .idle:
+            EmptyView()
+        case .outgoing, .connecting, .active:
+            HStack(spacing: 20) {
                 controlButton(
                     icon: service.isAudioMuted ? "mic.slash.fill" : "mic.fill",
                     active: service.isAudioMuted
-                ) {
-                    service.toggleMute()
-                }
+                ) { service.toggleMute() }
                 .accessibilityLabel(service.isAudioMuted ? "Unmute" : "Mute")
 
                 controlButton(
-                    icon: service.isVideoEnabled ? "video.fill" : "video.slash.fill",
-                    active: !service.isVideoEnabled
-                ) {
-                    Task { await service.toggleVideo() }
+                    icon: service.isSpeakerOn ? "speaker.wave.3.fill" : "speaker.fill",
+                    active: service.isSpeakerOn
+                ) { service.toggleSpeaker() }
+                .accessibilityLabel(service.isSpeakerOn ? "Speaker off" : "Speaker on")
+
+                // Only on video calls: video can't be added to a voice call yet.
+                if service.isVideoCall {
+                    controlButton(
+                        icon: service.isVideoEnabled ? "video.fill" : "video.slash.fill",
+                        active: !service.isVideoEnabled
+                    ) { Task { await service.toggleVideo() } }
+                    .accessibilityLabel(service.isVideoEnabled ? "Turn off camera" : "Turn on camera")
                 }
-                .accessibilityLabel(service.isVideoEnabled ? "Turn off camera" : "Turn on camera")
 
                 controlButton(
                     icon: "rectangle.inset.filled.on.rectangle",
                     active: service.isScreenSharing
-                ) {
-                    Task { await service.toggleScreenShare() }
-                }
+                ) { Task { await service.toggleScreenShare() } }
                 .accessibilityLabel(service.isScreenSharing ? "Stop sharing screen" : "Share screen")
 
                 Button {
@@ -173,7 +211,7 @@ struct CallView: View {
                 .font(.title3)
                 .foregroundStyle(active ? .black : .white)
                 .frame(width: 52, height: 52)
-                .background(Circle().fill(active ? .white : .white.opacity(0.2)))
+                .background(Circle().fill(active ? Color.white : Color.white.opacity(0.2)))
         }
     }
 
@@ -215,25 +253,51 @@ struct CallView: View {
 }
 
 #if canImport(WebRTC)
-/// Bridges `RTCMTLVideoView` into SwiftUI.
+/// Bridges `RTCMTLVideoView` into SwiftUI and attaches it to a track.
 ///
-/// Metal-backed rather than the OpenGL variant: the OpenGL renderer is
-/// deprecated on iOS and drops frames on newer devices.
+/// FIX: the previous version created the view but never called
+/// `track.add(view)`, so it had no frames to draw. The coordinator remembers
+/// which track the view is attached to, re-attaches when the track changes,
+/// and detaches when the view goes away (otherwise the track keeps a dead
+/// renderer around).
 struct RTCVideoView: UIViewRepresentable {
+    let track: RTCVideoTrack
     var isLocal = false
     var isScreenShare = false
 
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeUIView(context: Context) -> RTCMTLVideoView {
         let view = RTCMTLVideoView()
-        // A shared screen is usually a document or a slide, where cropping
-        // loses the edges that matter. Camera video fills instead, because
-        // letterboxed faces look worse than slightly cropped ones.
-        view.videoContentMode = isScreenShare ? .scaleAspectFit : .scaleAspectFill
-        // The self-view is mirrored to match what a mirror would show.
-        view.transform = isLocal ? CGAffineTransform(scaleX: -1, y: 1) : .identity
+        configure(view)
+        track.add(view)
+        context.coordinator.track = track
         return view
     }
 
-    func updateUIView(_ uiView: RTCMTLVideoView, context: Context) {}
+    func updateUIView(_ view: RTCMTLVideoView, context: Context) {
+        configure(view)
+        if context.coordinator.track !== track {
+            context.coordinator.track?.remove(view)
+            track.add(view)
+            context.coordinator.track = track
+        }
+    }
+
+    static func dismantleUIView(_ view: RTCMTLVideoView, coordinator: Coordinator) {
+        coordinator.track?.remove(view)
+        coordinator.track = nil
+    }
+
+    private func configure(_ view: RTCMTLVideoView) {
+        // A shared screen is usually a document — don't crop its edges.
+        view.videoContentMode = isScreenShare ? .scaleAspectFit : .scaleAspectFill
+        // The self-view is mirrored, like a mirror.
+        view.transform = isLocal ? CGAffineTransform(scaleX: -1, y: 1) : .identity
+    }
+
+    final class Coordinator {
+        var track: RTCVideoTrack?
+    }
 }
 #endif

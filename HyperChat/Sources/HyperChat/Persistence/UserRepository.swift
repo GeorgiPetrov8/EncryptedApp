@@ -2,10 +2,7 @@ import Foundation
 import GRDB
 
 /// The client's identity trust store (Bug #2) and contact cache (Bug #11).
-///
-/// FIX: every method is now scoped to an owning account. With `users` keyed by
-/// `(ownerUserId, id)`, an unscoped lookup would be ambiguous and an unscoped write
-/// would silently clobber another account's pinned keys.
+/// Every method is scoped to an owning account.
 final class UserRepository {
     private let dbQueue: DatabaseQueue
 
@@ -40,12 +37,6 @@ final class UserRepository {
         }
     }
 
-    /// FIX: the missing half of account deletion.
-    ///
-    /// `AccountDeletionService` removed messages, conversations, sessions, media and
-    /// Keychain material, but never the `users` rows — so pinned identity keys and
-    /// usernames of a deleted account survived in the shared table indefinitely. With
-    /// `ownerUserId` in place this is finally expressible.
     func deleteAll(ownerUserId: String) throws {
         try dbQueue.write { db in
             _ = try User.filter(Column("ownerUserId") == ownerUserId).deleteAll(db)
@@ -55,9 +46,6 @@ final class UserRepository {
     // MARK: Contact caching (Bug #11)
 
     /// Records a display name for a peer we haven't pinned yet.
-    ///
-    /// Deliberately separate from `pinOrCompareIdentity`: knowing what to *call*
-    /// someone is not the same as trusting their keys.
     func upsertContactPlaceholder(ownerUserId: String, userId: String, username: String) throws {
         try dbQueue.write { db in
             if var existing = try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: userId)) {
@@ -86,16 +74,41 @@ final class UserRepository {
         }
     }
 
+    // MARK: Profiles (feature: profile pictures)
+
+    /// Applies a profile if it is newer than what's stored.
+    ///
+    /// The staleness check runs *inside* the write transaction, so two pushes
+    /// processed concurrently can't let the older one overwrite the newer.
+    ///
+    /// - Returns: whether the row changed.
+    @discardableResult
+    func applyProfile(
+        ownerUserId: String,
+        userId: String,
+        displayName: String?,
+        avatarFileName: String?,
+        updatedAt: Date
+    ) throws -> Bool {
+        try dbQueue.write { db in
+            guard var user = try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: userId)) else {
+                return false
+            }
+            if let current = user.profileUpdatedAt, current >= updatedAt { return false }
+            user.displayName = displayName
+            user.avatarFileName = avatarFileName
+            user.profileUpdatedAt = updatedAt
+            try user.update(db)
+            return true
+        }
+    }
+
     // MARK: Identity pinning (Bug #2)
 
     enum IdentityCheck: Equatable {
-        /// No prior record — the identity has just been pinned (trust on first use).
         case pinned
-        /// Presented identity matches what we pinned.
         case matches
-        /// Presented identity differs. Recorded as pending; the caller must abort.
         case changed
-        /// A previously recorded change is still unacknowledged.
         case changePending
     }
 
@@ -126,8 +139,7 @@ final class UserRepository {
                 return .changePending
             }
 
-            // A placeholder row (Bug #11) has no pinned key yet, so this is still a
-            // first pin rather than a mismatch.
+            // A placeholder row has no pinned key yet, so this is still a first pin.
             if existing.publicKey.isEmpty {
                 existing.publicKey = agreementKey
                 existing.identitySigningKey = signingKey
@@ -140,7 +152,7 @@ final class UserRepository {
             if existing.publicKey == agreementKey && signingMatches {
                 var didChange = false
                 if existing.identitySigningKey == nil {
-                    existing.identitySigningKey = signingKey // backfill for v1 rows
+                    existing.identitySigningKey = signingKey
                     didChange = true
                 }
                 if let username, existing.username != username {
@@ -160,8 +172,7 @@ final class UserRepository {
         }
     }
 
-    /// Promotes the pending identity to the pinned one. Only ever called from an
-    /// explicit user action in `VerifyIdentityView`.
+    /// Promotes the pending identity to the pinned one.
     func acknowledgeIdentityChange(ownerUserId: String, userId: String) throws {
         try dbQueue.write { db in
             guard var user = try User.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: userId)),
@@ -171,7 +182,7 @@ final class UserRepository {
             user.pendingIdentityAgreementKey = nil
             user.pendingIdentitySigningKey = nil
             user.identityChangedAt = nil
-            user.isVerified = false // a new identity always starts unverified
+            user.isVerified = false
             try user.update(db)
         }
     }

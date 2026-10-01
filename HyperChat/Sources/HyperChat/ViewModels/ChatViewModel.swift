@@ -23,12 +23,6 @@ final class ChatViewModel: ObservableObject {
     @Published var draftText = ""
     @Published var errorMessage: String?
     @Published var isSending = false
-
-    /// FIX (Bug #17): whether the last failure is worth retrying.
-    ///
-    /// Retrying `awaitingFirstMessage` succeeds as soon as the peer replies; retrying
-    /// `invalidSignature` never will. Presenting both identically trained users to
-    /// ignore the difference, so the retry affordance is now conditional.
     @Published private(set) var canRetryLastSend = false
 
     @Published private(set) var receiveError: String?
@@ -37,48 +31,85 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var peerIsVerified = false
     @Published private(set) var peerIdentityChanged = false
 
+    /// FIX (invitations): where this chat stands. Drives the banner, whether
+    /// you can type, and whether the call button is enabled.
+    @Published private(set) var relationshipState: RelationshipState = .accepted
+    @Published private(set) var isUpdatingInvitation = false
+    /// Set when the conversation was deleted (you declined it) — the view
+    /// pops back to the list.
+    @Published private(set) var wasRemoved = false
+
     @Published var selectedPhotoItem: PhotosPickerItem? {
         didSet {
             guard let item = selectedPhotoItem else { return }
-
-            Task {
-                await sendPhoto(item)
-            }
+            Task { await sendPhoto(item) }
         }
     }
-
     @Published private(set) var isSendingMedia = false
-    
-    let conversation: Conversation
+
+    private(set) var conversation: Conversation
     private let messageRepository: MessageRepository
+    private let conversationRepository: ConversationRepository
     private let messagingService: MessagingService
     private let authService: AuthService
+    private let receiptService: ReceiptService
+    private let invitationService: InvitationService
     private var cancellables = Set<AnyCancellable>()
 
-    /// Held so the retry button can resend exactly what failed.
     private var lastFailedDraft: String?
     private var messagesById: [String: Message] = [:]
-    
+    private var isVisible = false
+
     init(
         conversation: Conversation,
         messageRepository: MessageRepository,
+        conversationRepository: ConversationRepository,
         messagingService: MessagingService,
-        authService: AuthService
+        authService: AuthService,
+        receiptService: ReceiptService,
+        invitationService: InvitationService
     ) {
         self.conversation = conversation
         self.messageRepository = messageRepository
+        self.conversationRepository = conversationRepository
         self.messagingService = messagingService
         self.authService = authService
+        self.receiptService = receiptService
+        self.invitationService = invitationService
+        self.relationshipState = conversation.relationshipState
+
+        let conversationId = conversation.id
 
         messagingService.$incomingMessage
             .compactMap { $0 }
-            .filter { $0.conversationId == conversation.id }
+            .filter { $0.conversationId == conversationId }
             .sink { [weak self] _ in
+                self?.reloadConversation()
                 self?.reload()
-                // A message from the peer is exactly what unblocks
-                // `awaitingFirstMessage`, so refresh the retry affordance.
                 self?.reloadPeer()
             }
+            .store(in: &cancellables)
+
+        // Queued messages flushed after acceptance, implicit acceptance, etc.
+        messagingService.conversationChanged
+            .filter { $0 == conversationId }
+            .sink { [weak self] _ in
+                self?.reloadConversation()
+                self?.reload()
+            }
+            .store(in: &cancellables)
+
+        invitationService.changes
+            .filter { $0 == conversationId }
+            .sink { [weak self] _ in
+                self?.reloadConversation()
+                self?.reload()
+            }
+            .store(in: &cancellables)
+
+        receiptService.updates
+            .filter { $0 == conversationId }
+            .sink { [weak self] _ in self?.reload() }
             .store(in: &cancellables)
 
         messagingService.$identityAlert
@@ -89,16 +120,101 @@ final class ChatViewModel: ObservableObject {
             .sink { [weak self] value in self?.receiveError = value }
             .store(in: &cancellables)
 
+        NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.markVisibleMessagesRead() }
+            .store(in: &cancellables)
+
+        reloadConversation()
         reloadPeer()
         reload()
     }
+
+    // MARK: Invitation state
+
+    var canCompose: Bool {
+        !peerIdentityChanged && (relationshipState == .accepted || relationshipState == .invitedByMe)
+    }
+
+    var canCall: Bool {
+        !peerIdentityChanged && relationshipState == .accepted
+    }
+
+    /// Why typing is disabled, shown as the text field placeholder.
+    var composeDisabledReason: String? {
+        if peerIdentityChanged { return "Verification required" }
+        switch relationshipState {
+        case .accepted, .invitedByMe: return nil
+        case .invitedByThem: return "Accept to reply"
+        case .declined: return "Invitation declined"
+        }
+    }
+
+    func reloadConversation() {
+        guard let myUserId = authService.currentUserId else { return }
+        if let fresh = try? conversationRepository.fetch(id: conversation.id, ownerUserId: myUserId) {
+            conversation = fresh
+            relationshipState = fresh.relationshipState
+        } else {
+            wasRemoved = true
+        }
+    }
+
+    func acceptInvitation() async {
+        isUpdatingInvitation = true
+        defer { isUpdatingInvitation = false }
+        conversation = await invitationService.accept(conversation)
+        relationshipState = conversation.relationshipState
+        reload()
+    }
+
+    func declineInvitation() async {
+        isUpdatingInvitation = true
+        defer { isUpdatingInvitation = false }
+        await invitationService.decline(conversation)
+        wasRemoved = true
+    }
+
+    func resendInvitation() async {
+        isUpdatingInvitation = true
+        defer { isUpdatingInvitation = false }
+        do {
+            try await invitationService.resend(conversation)
+            errorMessage = nil
+            reloadConversation()
+        } catch {
+            errorMessage = "Couldn't send the invitation: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: Visibility (read receipts)
+
+    func setVisible(_ visible: Bool) {
+        isVisible = visible
+        if visible { markVisibleMessagesRead() }
+    }
+
+    private func markVisibleMessagesRead() {
+        guard isVisible,
+              relationshipState == .accepted,
+              UIApplication.shared.applicationState == .active,
+              let myUserId = authService.currentUserId else { return }
+
+        let unread = messagesById.values
+            .filter { $0.senderId != myUserId && $0.readAt == nil && !$0.isUndecryptable }
+            .map(\.id)
+        guard !unread.isEmpty else { return }
+
+        receiptService.markRead(messageIds: unread, in: conversation)
+        for id in unread { messagesById[id]?.readAt = Date() }
+    }
+
+    // MARK: Loading
 
     func reloadPeer() {
         do {
             guard let peer = try messagingService.peer(for: conversation) else { return }
             peerId = peer.id
-            // FIX (Bug #11): fall back to a shortened id rather than "Unknown".
-            peerUsername = peer.username.isEmpty ? String(peer.id.prefix(8)) : peer.username
+            peerUsername = peer.shownName
             peerIsVerified = peer.isVerified
             peerIdentityChanged = peer.hasUnacknowledgedIdentityChange
         } catch {
@@ -113,12 +229,9 @@ final class ChatViewModel: ObservableObject {
                 conversationId: conversation.id,
                 ownerUserId: myUserId
             )
-            messagesById = Dictionary(
-                uniqueKeysWithValues: stored.map { ($0.id, $0) }
-            )
+            messagesById = Dictionary(uniqueKeysWithValues: stored.map { ($0.id, $0) })
             messages = stored.map { message in
                 let mediaMetadata = messagingService.mediaDisplayMetadata(for: message)
-
                 return DisplayMessage(
                     id: message.id,
                     isMine: message.senderId == myUserId,
@@ -133,21 +246,15 @@ final class ChatViewModel: ObservableObject {
                     readAt: message.readAt
                 )
             }
+            markVisibleMessagesRead()
         } catch {
             errorMessage = "Couldn't load messages: \(error.localizedDescription)"
         }
     }
-    
-    func loadMediaData(forMessageId messageId: String) async -> Data? {
-        guard let message = messagesById[messageId] else {
-            return nil
-        }
 
-        do {
-            return try await messagingService.mediaData(for: message)
-        } catch {
-            return nil
-        }
+    func loadMediaData(forMessageId messageId: String) async -> Data? {
+        guard let message = messagesById[messageId] else { return nil }
+        return try? await messagingService.mediaData(for: message)
     }
 
     func dismissReceiveError() {
@@ -161,192 +268,98 @@ final class ChatViewModel: ObservableObject {
         lastFailedDraft = nil
     }
 
-    /// FIX (Bug #17): re-attempts the send that failed recoverably.
     func retryLastSend() async {
         guard let draft = lastFailedDraft else { return }
         draftText = draft
         await send()
     }
-    
+
+    // MARK: Media
+
     private func sendPhoto(_ item: PhotosPickerItem) async {
-        defer {
-            selectedPhotoItem = nil
-        }
-
-        guard !peerIdentityChanged else {
-            errorMessage = IdentityError
-                .identityChangeUnacknowledged(userId: peerId ?? "")
-                .localizedDescription
-            return
-        }
-
-        isSendingMedia = true
-        defer {
-            isSendingMedia = false
-        }
-
-        do {
+        defer { selectedPhotoItem = nil }
+        await sendMediaGuarded {
             let prepared = try await PhotoAttachmentLoader.loadAndPrepare(item)
-
-            try await messagingService.sendMedia(
+            try await self.messagingService.sendMedia(
                 rawData: prepared.imageData,
                 thumbnail: prepared.thumbnailData,
                 mediaType: .image,
-                in: conversation
+                in: self.conversation
             )
-
-            reload()
-        } catch let identityError as IdentityError {
-            reloadPeer()
-            errorMessage = identityError.localizedDescription
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func sendCapturedMedia(_ capture: CameraPicker.Capture) async {
-        guard !peerIdentityChanged else {
-            errorMessage = IdentityError
-                .identityChangeUnacknowledged(userId: peerId ?? "")
-                .localizedDescription
-            return
-        }
-
-        isSendingMedia = true
-        defer {
-            isSendingMedia = false
-        }
-
-        do {
+        await sendMediaGuarded {
             switch capture {
             case .photo(let data):
-                try await messagingService.sendMedia(
-                    rawData: data,
-                    thumbnail: nil,
-                    mediaType: .image,
-                    in: conversation
+                try await self.messagingService.sendMedia(
+                    rawData: data, thumbnail: nil, mediaType: .image, in: self.conversation
                 )
-
             case .video(let url):
                 let data = try Data(contentsOf: url)
-
-                try await messagingService.sendMedia(
-                    rawData: data,
-                    thumbnail: nil,
-                    mediaType: .video,
-                    in: conversation
+                try await self.messagingService.sendMedia(
+                    rawData: data, thumbnail: nil, mediaType: .video, in: self.conversation
                 )
             }
-
-            reload()
-
-        } catch let identityError as IdentityError {
-            reloadPeer()
-            errorMessage = identityError.localizedDescription
-
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func sendDocument(from url: URL) async {
-        guard !peerIdentityChanged else {
-            errorMessage = IdentityError
-                .identityChangeUnacknowledged(userId: peerId ?? "")
-                .localizedDescription
-            return
-        }
-
-        isSendingMedia = true
-        defer {
-            isSendingMedia = false
-        }
-
-        do {
+        await sendMediaGuarded {
             let data = try Data(contentsOf: url)
-
-            try await messagingService.sendMedia(
-                rawData: data,
-                thumbnail: nil,
-                mediaType: .document,
-                in: conversation
+            try await self.messagingService.sendMedia(
+                rawData: data, thumbnail: nil, mediaType: .document, in: self.conversation
             )
-
-            reload()
-
-        } catch let identityError as IdentityError {
-            reloadPeer()
-            errorMessage = identityError.localizedDescription
-
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func sendGIF(_ data: Data) async {
-        guard !peerIdentityChanged else {
-            errorMessage = IdentityError
-                .identityChangeUnacknowledged(userId: peerId ?? "")
-                .localizedDescription
-            return
-        }
-
-        isSendingMedia = true
-        defer {
-            isSendingMedia = false
-        }
-
-        do {
-            try await messagingService.sendMedia(
-                rawData: data,
-                thumbnail: nil,
-                mediaType: .image,
-                in: conversation
+        await sendMediaGuarded {
+            try await self.messagingService.sendMedia(
+                rawData: data, thumbnail: nil, mediaType: .image, in: self.conversation
             )
-
-            reload()
-
-        } catch let identityError as IdentityError {
-            reloadPeer()
-            errorMessage = identityError.localizedDescription
-
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
-    
+
     func sendVoiceMessage(_ voiceMessage: RecordedVoiceMessage) async {
-        guard !peerIdentityChanged else {
-            errorMessage = IdentityError
-                .identityChangeUnacknowledged(userId: peerId ?? "")
-                .localizedDescription
-            return
-        }
-
-        isSendingMedia = true
-        defer {
-            isSendingMedia = false
-        }
-
-        do {
-            try await messagingService.sendMedia(
+        await sendMediaGuarded {
+            try await self.messagingService.sendMedia(
                 rawData: voiceMessage.data,
                 thumbnail: nil,
                 mediaType: .audio,
                 duration: voiceMessage.duration,
                 waveform: voiceMessage.normalisedWaveform(),
-                in: conversation
+                in: self.conversation
             )
+        }
+    }
 
+    private func sendMediaGuarded(_ operation: () async throws -> Void) async {
+        guard !peerIdentityChanged else {
+            errorMessage = IdentityError
+                .identityChangeUnacknowledged(userId: peerId ?? "")
+                .localizedDescription
+            return
+        }
+
+        isSendingMedia = true
+        defer { isSendingMedia = false }
+
+        do {
+            try await operation()
             reload()
         } catch let identityError as IdentityError {
             reloadPeer()
             errorMessage = identityError.localizedDescription
         } catch {
             errorMessage = error.localizedDescription
+            reload()
         }
     }
-    
+
+    // MARK: Text
+
     func send() async {
         let text = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -368,8 +381,6 @@ final class ChatViewModel: ObservableObject {
             lastFailedDraft = nil
             reload()
         } catch let cryptoError as CryptoError {
-            // FIX (Bug #17): a described error and an honest retry affordance,
-            // replacing "Couldn't send message: The operation couldn't be completed."
             errorMessage = cryptoError.localizedDescription
             canRetryLastSend = cryptoError.isRecoverable
             lastFailedDraft = cryptoError.isRecoverable ? text : nil
@@ -379,9 +390,13 @@ final class ChatViewModel: ObservableObject {
             errorMessage = identityError.localizedDescription
             canRetryLastSend = false
             lastFailedDraft = nil
+        } catch let invitationError as InvitationError {
+            // Not retryable: the state has to change first.
+            draftText = text
+            errorMessage = invitationError.localizedDescription
+            canRetryLastSend = false
         } catch {
             errorMessage = error.localizedDescription
-            // Network-shaped failures are worth another attempt.
             canRetryLastSend = true
             lastFailedDraft = text
             reload()

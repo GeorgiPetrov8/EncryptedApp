@@ -3,7 +3,7 @@ import SwiftUI
 struct ConversationListView: View {
     @EnvironmentObject private var container: AppContainer
     @StateObject private var viewModel: ConversationListViewModel
-    @State private var showNewConversation = false
+    @State private var showNewInvitation = false
     @State private var navigateToConversation: Conversation?
 
     init(container: AppContainer) {
@@ -13,6 +13,7 @@ struct ConversationListView: View {
                 messageRepository: container.messageRepository,
                 userRepository: container.userRepository,
                 messagingService: container.messagingService,
+                invitationService: container.invitationService,
                 authService: container.authService
             )
         )
@@ -20,110 +21,189 @@ struct ConversationListView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if viewModel.summaries.isEmpty {
-                    // NOTE (Bug #19): `ContentUnavailableView` is iOS 17+, which is
-                    // now the deployment target — see project.yml.
-                    ContentUnavailableView(
-                        "No conversations yet",
-                        systemImage: "bubble.left.and.bubble.right",
-                        description: Text("Tap the compose button to start an encrypted conversation.")
-                    )
+            list
+                .navigationTitle("Chats")
+                .toolbar { toolbarContent }
+                .navigationDestination(item: $navigateToConversation) { conversation in
+                    ChatView(container: container, conversation: conversation)
                 }
-                ForEach(viewModel.summaries) { summary in
-                    Button {
-                        navigateToConversation = summary.conversation
-                    } label: {
-                        ConversationRow(summary: summary)
+                // FIX (problem 5): "new chat" now sends an invitation instead
+                // of opening a chat you can write into directly.
+                .sheet(isPresented: $showNewInvitation) {
+                    NewInvitationView { conversation in
+                        showNewInvitation = false
+                        viewModel.reload()
+                        navigateToConversation = conversation
                     }
+                    .environmentObject(container)
                 }
-            }
-            .navigationTitle("Chats")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    NavigationLink {
-                        SettingsView()
-                    } label: {
-                        Image(systemName: "gearshape")
+                .refreshable {
+                    if let userId = container.authService.currentUserId {
+                        await container.messagingService.backfillPendingEnvelopes(myUserId: userId)
                     }
+                    viewModel.reload()
+                    container.invitationService.reloadPending()
                 }
-                // FIX (Bug #25): visible connection state.
-                //
-                // When the listener failed to start there was no way to tell from the
-                // UI — the app looked normal and simply never received anything.
-                ToolbarItem(placement: .principal) {
-                    ConnectionIndicator(
-                        isListening: container.messagingService.isListening,
-                        isSyncing: container.messagingService.isSyncing
-                    )
+                .onAppear {
+                    viewModel.reload()
+                    container.invitationService.reloadPending()
                 }
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    NavigationLink {
-                        InvitationsView()
-                    } label: {
-                        Image(systemName: "person.crop.circle.badge.questionmark")
-                    }
+                .task { await container.invitationService.requestNotificationPermission() }
+        }
+        // FIX (calls): the call screen covers everything while a call is in
+        // progress — including an incoming call while you're in another chat.
+        .fullScreenCover(isPresented: isCallPresented) {
+            CallView()
+                .environmentObject(container)
+        }
+    }
 
-                    Button {
-                        showNewConversation = true
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                    }
+    private var isCallPresented: Binding<Bool> {
+        Binding(
+            get: { container.callService.phase != .idle },
+            set: { _ in } // dismissed by the call ending, never by a swipe
+        )
+    }
+
+    // MARK: List
+
+    private var list: some View {
+        List {
+            if viewModel.summaries.isEmpty {
+                ContentUnavailableView(
+                    "No conversations yet",
+                    systemImage: "bubble.left.and.bubble.right",
+                    description: Text("Tap the compose button to invite someone to an encrypted chat.")
+                )
+            }
+            ForEach(viewModel.summaries) { summary in
+                Button {
+                    navigateToConversation = summary.conversation
+                } label: {
+                    ConversationRow(
+                        summary: summary,
+                        avatar: avatar(for: summary.peerId),
+                        isOnline: summary.relationshipState == .accepted
+                            && container.presenceService.isOnline(summary.peerId)
+                    )
                 }
             }
-            .navigationDestination(item: $navigateToConversation) { conversation in
-                ChatView(container: container, conversation: conversation)
+        }
+    }
+
+    private func avatar(for peerId: String) -> Data? {
+        _ = container.profileService.version
+        return container.profileService.avatarData(for: peerId)
+    }
+
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarLeading) {
+            NavigationLink {
+                SettingsView()
+            } label: {
+                Image(systemName: "gearshape")
             }
-            .sheet(isPresented: $showNewConversation) {
-                NewConversationSheet(viewModel: viewModel, onStarted: { conversation in
-                    showNewConversation = false
-                    navigateToConversation = conversation
-                })
+        }
+        ToolbarItem(placement: .principal) {
+            ConnectionIndicator(
+                isListening: container.messagingService.isListening,
+                isSyncing: container.messagingService.isSyncing
+            )
+        }
+        ToolbarItemGroup(placement: .navigationBarTrailing) {
+            NavigationLink {
+                InvitationsView()
+            } label: {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .overlay(alignment: .topTrailing) { invitationBadge }
             }
-            .refreshable {
-                // FIX (Bug #12): manual recovery path if the listener is wedged.
-                if let userId = container.authService.currentUserId {
-                    await container.messagingService.backfillPendingEnvelopes(myUserId: userId)
-                }
-                viewModel.reload()
+            .accessibilityLabel("Invitations, \(container.invitationService.pendingCount) pending")
+
+            Button {
+                showNewInvitation = true
+            } label: {
+                Image(systemName: "square.and.pencil")
             }
-            .onAppear { viewModel.reload() }
+            .accessibilityLabel("New chat")
+        }
+    }
+
+    @ViewBuilder
+    private var invitationBadge: some View {
+        let count = container.invitationService.pendingCount
+        if count > 0 {
+            Text("\(count)")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(4)
+                .background(Circle().fill(Color.red))
+                .offset(x: 8, y: -8)
         }
     }
 }
 
 private struct ConversationRow: View {
     let summary: ConversationSummary
+    let avatar: Data?
+    let isOnline: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(summary.otherUsername)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                if summary.isVerified {
-                    Image(systemName: "checkmark.shield.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                        .accessibilityLabel("Identity verified")
+        HStack(spacing: 12) {
+            AvatarView(
+                userId: summary.peerId,
+                displayName: summary.otherUsername,
+                imageData: avatar,
+                size: 48,
+                isOnline: isOnline
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(summary.otherUsername)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    if summary.isVerified {
+                        Image(systemName: "checkmark.shield.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                            .accessibilityLabel("Identity verified")
+                    }
+                    if summary.hasIdentityWarning {
+                        Image(systemName: "exclamationmark.shield.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("Security keys changed")
+                    }
+                    Spacer()
+                    if let date = summary.lastActivityAt {
+                        Text(date, style: .time)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                if summary.hasIdentityWarning {
-                    Image(systemName: "exclamationmark.shield.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                        .accessibilityLabel("Security keys changed")
-                }
-                Spacer()
-                if let date = summary.lastActivityAt {
-                    Text(date, style: .time)
-                        .font(.caption2)
+                HStack(spacing: 4) {
+                    stateIcon
+                    Text(summary.lastMessagePreview)
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
-            Text(summary.lastMessagePreview)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+        }
+    }
+
+    @ViewBuilder
+    private var stateIcon: some View {
+        switch summary.relationshipState {
+        case .invitedByMe:
+            Image(systemName: "hourglass").font(.caption).foregroundStyle(.orange)
+        case .declined:
+            Image(systemName: "xmark.circle").font(.caption).foregroundStyle(.red)
+        case .accepted, .invitedByThem:
+            EmptyView()
         }
     }
 }
@@ -146,47 +226,5 @@ private struct ConnectionIndicator: View {
         }
         .foregroundStyle(.secondary)
         .accessibilityElement(children: .combine)
-    }
-}
-
-private struct NewConversationSheet: View {
-    @ObservedObject var viewModel: ConversationListViewModel
-    let onStarted: (Conversation) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Start a new encrypted conversation") {
-                    TextField("Their username", text: $viewModel.newConversationUsername)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
-                if let error = viewModel.errorMessage {
-                    Text(error).foregroundStyle(.red).font(.footnote)
-                }
-            }
-            .navigationTitle("New Chat")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        Task {
-                            if let conversation = await viewModel.startConversation() {
-                                onStarted(conversation)
-                            }
-                        }
-                    } label: {
-                        if viewModel.isStartingConversation {
-                            ProgressView()
-                        } else {
-                            Text("Start")
-                        }
-                    }
-                }
-            }
-        }
     }
 }

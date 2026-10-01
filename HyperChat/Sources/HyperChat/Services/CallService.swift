@@ -7,70 +7,54 @@ import os
 import WebRTC
 #endif
 
-/// Orchestrates calls: signalling over the encrypted channel, media over
-/// WebRTC (feature: audio/video calls and screen sharing).
+/// Orchestrates calls: signalling over the encrypted channel, media over WebRTC.
 ///
-/// ## Dependency
-///
-/// This needs `stasel/WebRTC` (the maintained SPM distribution of Google's
-/// `libwebrtc`), added to `project.yml`:
-///
-/// ```yaml
-/// packages:
-///   WebRTC:
-///     url: https://github.com/stasel/WebRTC.git
-///     from: 120.0.0
-/// ```
-///
-/// It is guarded by `#if canImport(WebRTC)` so the project still builds
-/// before the package is added — the call buttons then report that calling
-/// isn't available in this build, rather than failing to compile.
-///
-/// I could not build or run this here (no Xcode, no iOS SDK), and WebRTC has
-/// more integration surface than anything else in this project. Treat the
-/// media plumbing as needing a real device test, unlike the signalling and
-/// state machine, which are ordinary Swift.
+/// Needs the `stasel/WebRTC` Swift package. Guarded by `#if canImport(WebRTC)`
+/// so the project still builds without it — the call buttons then say calling
+/// isn't available.
 @MainActor
 final class CallService: NSObject, ObservableObject {
 
     @Published private(set) var phase: CallPhase = .idle
     @Published private(set) var isAudioMuted = false
     @Published private(set) var isVideoEnabled = false
+    @Published private(set) var isSpeakerOn = false
     @Published private(set) var isScreenSharing = false
     @Published private(set) var remoteIsScreenSharing = false
     @Published private(set) var remoteIsVideoEnabled = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var connectedAt: Date?
+    /// FIX: published so `CallView` can show who's calling.
+    @Published private(set) var activePeerId: String?
+    /// Whether this call was started as a video call. Video can't be added to
+    /// an audio call mid-way (that needs SDP renegotiation, not implemented).
+    @Published private(set) var isVideoCall = false
+
+    #if canImport(WebRTC)
+    /// FIX: the tracks are exposed so the video views can actually render
+    /// them. The previous `RTCVideoView` was never attached to any track, so
+    /// video calls showed a black screen on both sides.
+    @Published private(set) var localVideoTrack: RTCVideoTrack?
+    @Published private(set) var remoteVideoTrack: RTCVideoTrack?
+    #endif
 
     private let authService: AuthService
     private let userRepository: UserRepository
     private let conversationRepository: ConversationRepository
     private let logger = Logger(subsystem: "com.HyperChat", category: "call")
 
-    /// Injected by `AppContainer`, same pattern as the other services — this is
-    /// built before `MessagingService`, which holds it.
     private var sendHandler: ((CallSignal, Conversation) async throws -> Void)?
 
     private var activeConversation: Conversation?
-    private var activePeerId: String?
     private var ringTimeoutTask: Task<Void, Never>?
-
-    /// ICE candidates that arrive before the remote description is set.
-    ///
-    /// This is a real ordering hazard, not a theoretical one: candidates are
-    /// emitted as soon as gathering starts and routinely overtake the
-    /// offer/answer they belong to. Adding one before the remote description
-    /// exists throws, so they're buffered and flushed afterwards.
+    private var connectTimeoutTask: Task<Void, Never>?
     private var pendingRemoteCandidates: [IceCandidate] = []
 
     #if canImport(WebRTC)
     private var peerConnection: RTCPeerConnection?
     private var localAudioTrack: RTCAudioTrack?
-    private var localVideoTrack: RTCVideoTrack?
     private var videoCapturer: RTCCameraVideoCapturer?
 
-    /// One factory for the process. Creating several is a documented way to
-    /// get audio-unit conflicts and crashes in libwebrtc.
     private static let factory: RTCPeerConnectionFactory = {
         RTCInitializeSSL()
         return RTCPeerConnectionFactory(
@@ -103,59 +87,73 @@ final class CallService: NSObject, ObservableObject {
         #endif
     }
 
+    /// Returns and clears the last error, for callers that show it themselves.
+    func consumeError() -> String? {
+        defer { errorMessage = nil }
+        return errorMessage
+    }
+
+    private var currentCallId: String? {
+        switch phase {
+        case .outgoing(let id, _), .incoming(let id, _, _), .connecting(let id), .active(let id):
+            return id
+        case .idle, .ended:
+            return nil
+        }
+    }
+
     // MARK: Placing a call
 
     func startCall(in conversation: Conversation, video: Bool) async {
+        errorMessage = nil
         guard isAvailable else {
-            errorMessage = "Calling isn't available in this build."
+            errorMessage = "Calling needs the WebRTC package, which isn't in this build."
             return
         }
         guard !phase.isBusy else { return }
-//        guard conversation.relationshipState.allowsSending else {
-//            // Calling someone who hasn't accepted an invitation would bypass
-//            // the gate the invitation feature exists to provide.
-//            errorMessage = "You can't call someone who hasn't accepted your invitation."
-//            return
-//        }
+
         guard let myUserId = authService.currentUserId,
               let peerId = conversation.otherParticipant(myUserId: myUserId) else { return }
 
+        // FIX: re-enabled. Calling someone who hasn't accepted an invitation
+        // would bypass the gate the invitation feature exists to provide.
+        let fresh = (try? conversationRepository.fetch(id: conversation.id, ownerUserId: myUserId)) ?? conversation
+        guard fresh.relationshipState.allowsSending else {
+            errorMessage = "You can call someone once they've accepted your invitation."
+            return
+        }
+
         guard await requestPermissions(video: video) else {
             errorMessage = video
-                ? "Camera and microphone access are needed for video calls."
-                : "Microphone access is needed for calls."
+                ? "Camera and microphone access are needed for video calls. Enable them in Settings."
+                : "Microphone access is needed for calls. Enable it in Settings."
             return
         }
 
         let callId = UUID().uuidString
-        activeConversation = conversation
+        activeConversation = fresh
         activePeerId = peerId
+        isVideoCall = video
         isVideoEnabled = video
+        isSpeakerOn = video
         phase = .outgoing(callId: callId, isVideo: video)
 
         #if canImport(WebRTC)
         do {
-            let connection = try makePeerConnection()
+            let connection = try makePeerConnection(video: video)
             peerConnection = connection
             try attachLocalMedia(to: connection, video: video)
 
-            let constraints = RTCMediaConstraints(
-                mandatoryConstraints: [
-                    "OfferToReceiveAudio": "true",
-                    "OfferToReceiveVideo": video ? "true" : "false",
-                ],
-                optionalConstraints: nil
-            )
-            let offer = try await connection.offer(for: constraints)
+            let offer = try await connection.offer(for: mediaConstraints(video: video))
             try await connection.setLocalDescription(offer)
 
             try await sendHandler?(
                 .offer(CallOffer(callId: callId, sdp: offer.sdp, isVideo: video, startedAt: Date())),
-                conversation
+                fresh
             )
-            startRingTimeout(callId: callId)
+            startRingTimeout()
         } catch {
-            logger.error("Couldn't start the call")
+            logger.error("Couldn't start the call: \(String(describing: error), privacy: .public)")
             errorMessage = "Couldn't start the call."
             await endCall(reason: .failed)
         }
@@ -169,32 +167,34 @@ final class CallService: NSObject, ObservableObject {
               let conversation = activeConversation else { return }
 
         guard await requestPermissions(video: isVideo) else {
+            errorMessage = "Microphone access is needed to answer. Enable it in Settings."
             await endCall(reason: .declined)
             return
         }
 
+        // FIX: the ring timeout used to keep running after answering. If ICE
+        // took longer than the remaining ring time, an answered call was hung
+        // up as "unanswered". Now ringing stops and a connect timeout starts.
+        ringTimeoutTask?.cancel()
         phase = .connecting(callId: callId)
+        isVideoCall = isVideo
         isVideoEnabled = isVideo
+        isSpeakerOn = isVideo
 
         #if canImport(WebRTC)
         do {
             guard let connection = peerConnection else { return }
+            try configureAudioSession(video: isVideo)
             try attachLocalMedia(to: connection, video: isVideo)
 
-            let constraints = RTCMediaConstraints(
-                mandatoryConstraints: [
-                    "OfferToReceiveAudio": "true",
-                    "OfferToReceiveVideo": isVideo ? "true" : "false",
-                ],
-                optionalConstraints: nil
-            )
-            let answer = try await connection.answer(for: constraints)
+            let answer = try await connection.answer(for: mediaConstraints(video: isVideo))
             try await connection.setLocalDescription(answer)
 
             try await sendHandler?(
                 .answer(CallAnswer(callId: callId, sdp: answer.sdp, isVideo: isVideo)),
                 conversation
             )
+            startConnectTimeout()
         } catch {
             logger.error("Couldn't answer the call")
             await endCall(reason: .failed)
@@ -207,6 +207,9 @@ final class CallService: NSObject, ObservableObject {
     }
 
     func hangUp() async {
+        guard phase.isBusy else { return }
+        // Cancelling our own unanswered call is "hang up" from our side; the
+        // other side shows it as a missed call.
         await endCall(reason: .hangUp)
     }
 
@@ -220,32 +223,32 @@ final class CallService: NSObject, ObservableObject {
         Task { await broadcastState() }
     }
 
-    func toggleVideo() async {
-        guard await requestPermissions(video: true) else { return }
-        isVideoEnabled.toggle()
-        #if canImport(WebRTC)
-        localVideoTrack?.isEnabled = isVideoEnabled
-        if isVideoEnabled { startCameraCapture() } else { await stopCameraCapture() }
-        #endif
-        await broadcastState()
+    func toggleSpeaker() {
+        isSpeakerOn.toggle()
+        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(isSpeakerOn ? .speaker : .none)
     }
 
-    /// Screen sharing.
+    /// Turns the camera off/on *within* a video call.
     ///
-    /// iOS only allows capturing the screen from a **Broadcast Upload
-    /// Extension** — a separate process started by the system's broadcast
-    /// picker. An app cannot grab its own screen, let alone the whole device,
-    /// from inside its own process. So this is not a single API call:
-    ///
-    ///   1. add a Broadcast Upload Extension target;
-    ///   2. share an App Group between app and extension;
-    ///   3. the extension receives `CMSampleBuffer`s and forwards them to the
-    ///      app over the App Group (a socket or shared memory);
-    ///   4. the app feeds them into an `RTCVideoSource` in place of the camera.
-    ///
-    /// `ScreenShareCoordinator` below marks that boundary. Without the
-    /// extension target this reports unavailable rather than silently doing
-    /// nothing, which is the failure mode that wastes an afternoon.
+    /// FIX: on an audio call there is no video track, so this used to flip the
+    /// "camera on" flag while nothing was being sent. Adding video to an audio
+    /// call needs renegotiation; until that exists the UI hides the button.
+    func toggleVideo() async {
+        #if canImport(WebRTC)
+        guard isVideoCall, let track = localVideoTrack else {
+            errorMessage = "Video can't be added to a voice call yet. Start a video call instead."
+            return
+        }
+        isVideoEnabled.toggle()
+        track.isEnabled = isVideoEnabled
+        if isVideoEnabled { startCameraCapture() } else { await stopCameraCapture() }
+        await broadcastState()
+        #endif
+    }
+
+    /// Screen sharing needs a Broadcast Upload Extension target — iOS doesn't
+    /// let an app capture the screen from its own process. Until that target
+    /// exists this reports the reason instead of silently doing nothing.
     func toggleScreenShare() async {
         guard ScreenShareCoordinator.isExtensionConfigured else {
             errorMessage = "Screen sharing needs the broadcast extension, which isn't set up in this build."
@@ -268,26 +271,29 @@ final class CallService: NSObject, ObservableObject {
         )
     }
 
-    private var currentCallId: String? {
-        switch phase {
-        case .outgoing(let id, _), .incoming(let id, _, _), .connecting(let id), .active(let id):
-            return id
-        case .idle, .ended:
-            return nil
-        }
-    }
-
     // MARK: Incoming signals
 
     func handle(_ signal: CallSignal, from peerId: String, conversation: Conversation) async {
-        // A signal from a previous call — a late ICE candidate, a duplicate
-        // hang-up — must not disturb the current one.
-        if let current = currentCallId, signal.callId != current, case .offer = signal {
-            // Except a *new* offer while busy, which gets a busy signal.
-            try? await sendHandler?(.end(CallEnd(callId: signal.callId, reason: .busy)), conversation)
-            return
+        if let current = currentCallId {
+            if signal.callId != current {
+                // A new offer while we're busy gets "busy"; any other signal
+                // from a different call is stale and ignored.
+                if case .offer(let offer) = signal, Self.isFresh(offer) {
+                    try? await sendHandler?(.end(CallEnd(callId: signal.callId, reason: .busy)), conversation)
+                }
+                return
+            }
+            // Only the person we're on a call with may control it.
+            if let activePeerId, activePeerId != peerId { return }
+        } else {
+            // FIX: no call in progress. Only an offer (or an early ICE
+            // candidate that overtook its offer) is meaningful. A late "end" or
+            // "update" from a finished call used to flash a "Call ended" screen.
+            switch signal {
+            case .offer, .candidate: break
+            case .answer, .end, .update: return
+            }
         }
-        if let current = currentCallId, signal.callId != current { return }
 
         switch signal {
         case .offer(let offer):
@@ -304,22 +310,47 @@ final class CallService: NSObject, ObservableObject {
         }
     }
 
+    /// FIX: an offer that waited in the offline queue must not ring.
+    ///
+    /// Signals travel through the same durable queue as messages, so an offer
+    /// sent while you were offline is delivered when you next open the app —
+    /// possibly hours later — and the phone would ring for a call the caller
+    /// gave up on long ago. The allowance on top of the ring timeout absorbs
+    /// clock differences between the two phones.
+    private static func isFresh(_ offer: CallOffer) -> Bool {
+        Date().timeIntervalSince(offer.startedAt) < CallLimits.ringTimeout + 15
+    }
+
     private func receiveOffer(_ offer: CallOffer, from peerId: String, conversation: Conversation) async {
+        guard Self.isFresh(offer) else {
+            logger.info("Ignoring a stale call offer")
+            return
+        }
+        guard conversation.relationshipState.allowsSending else {
+            logger.info("Ignoring a call from someone whose invitation isn't accepted")
+            return
+        }
         guard !phase.isBusy else {
             try? await sendHandler?(.end(CallEnd(callId: offer.callId, reason: .busy)), conversation)
             return
         }
+
         activeConversation = conversation
         activePeerId = peerId
+        // Set before the remote description, so early candidates for this
+        // call are accepted and stale ones from other calls dropped.
+        phase = .incoming(callId: offer.callId, isVideo: offer.isVideo, peerId: peerId)
+        remoteIsVideoEnabled = offer.isVideo
+        isVideoCall = offer.isVideo
 
         #if canImport(WebRTC)
         do {
-            let connection = try makePeerConnection()
+            let connection = try makePeerConnection(video: offer.isVideo)
             peerConnection = connection
             try await connection.setRemoteDescription(
                 RTCSessionDescription(type: .offer, sdp: offer.sdp)
             )
-            await flushPendingCandidates()
+            await flushPendingCandidates(callId: offer.callId)
         } catch {
             logger.error("Couldn't accept the incoming offer")
             await endCall(reason: .failed)
@@ -327,9 +358,7 @@ final class CallService: NSObject, ObservableObject {
         }
         #endif
 
-        phase = .incoming(callId: offer.callId, isVideo: offer.isVideo, peerId: peerId)
-        remoteIsVideoEnabled = offer.isVideo
-        startRingTimeout(callId: offer.callId)
+        startRingTimeout()
     }
 
     private func receiveAnswer(_ answer: CallAnswer) async {
@@ -339,10 +368,11 @@ final class CallService: NSObject, ObservableObject {
             try await connection.setRemoteDescription(
                 RTCSessionDescription(type: .answer, sdp: answer.sdp)
             )
-            await flushPendingCandidates()
+            await flushPendingCandidates(callId: answer.callId)
             remoteIsVideoEnabled = answer.isVideo
             phase = .connecting(callId: answer.callId)
             ringTimeoutTask?.cancel()
+            startConnectTimeout()
         } catch {
             logger.error("Couldn't apply the answer")
             await endCall(reason: .failed)
@@ -363,10 +393,12 @@ final class CallService: NSObject, ObservableObject {
         #endif
     }
 
-    private func flushPendingCandidates() async {
+    private func flushPendingCandidates(callId: String) async {
         #if canImport(WebRTC)
         guard let connection = peerConnection else { return }
-        for candidate in pendingRemoteCandidates {
+        // FIX: only this call's candidates; buffered leftovers from another
+        // call are discarded instead of being fed into this connection.
+        for candidate in pendingRemoteCandidates where candidate.callId == callId {
             try? await connection.add(
                 RTCIceCandidate(sdp: candidate.sdp, sdpMLineIndex: candidate.sdpMLineIndex, sdpMid: candidate.sdpMid)
             )
@@ -387,41 +419,64 @@ final class CallService: NSObject, ObservableObject {
     private func finish(reason: CallEnd.Reason) {
         ringTimeoutTask?.cancel()
         ringTimeoutTask = nil
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = nil
 
         #if canImport(WebRTC)
-        Task { await stopCameraCapture() }
+        let capturer = videoCapturer
+        capturer?.stopCapture()
+        videoCapturer = nil
         peerConnection?.close()
         peerConnection = nil
         localAudioTrack = nil
         localVideoTrack = nil
+        remoteVideoTrack = nil
         #endif
 
         pendingRemoteCandidates.removeAll()
         activeConversation = nil
-        activePeerId = nil
         isAudioMuted = false
         isVideoEnabled = false
+        isVideoCall = false
+        isSpeakerOn = false
         isScreenSharing = false
         remoteIsScreenSharing = false
         remoteIsVideoEnabled = false
         connectedAt = nil
         phase = .ended(reason: reason)
 
-        // Returns to idle after a moment so the UI can show why it ended.
+        // Back to idle after a moment, so the UI can show why it ended.
         Task {
             try? await Task.sleep(for: .seconds(2))
-            if case .ended = phase { phase = .idle }
+            if case .ended = self.phase {
+                self.phase = .idle
+                self.activePeerId = nil
+            }
         }
 
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    private func startRingTimeout(callId: String) {
+    private func startRingTimeout() {
         ringTimeoutTask?.cancel()
         ringTimeoutTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(CallLimits.ringTimeout))
             guard !Task.isCancelled else { return }
             await self?.endCall(reason: .unanswered)
+        }
+    }
+
+    /// FIX: without this a call whose media never connects sat on
+    /// "Connecting…" forever. With no TURN server that's not rare — strict
+    /// NATs and some mobile networks can't connect peer-to-peer.
+    private func startConnectTimeout() {
+        connectTimeoutTask?.cancel()
+        connectTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(CallLimits.connectTimeout))
+            guard !Task.isCancelled, let self else { return }
+            if case .active = self.phase { return }
+            self.errorMessage = "The call couldn't connect. One of you may be on a network that blocks direct connections."
+            await self.endCall(reason: .failed)
         }
     }
 
@@ -436,8 +491,7 @@ final class CallService: NSObject, ObservableObject {
 
     private func configureAudioSession(video: Bool) throws {
         let session = AVAudioSession.sharedInstance()
-        // `.videoChat` engages echo cancellation and prefers the speaker;
-        // `.voiceChat` keeps the earpiece for a phone-to-ear audio call.
+        // `.videoChat` prefers the speaker; `.voiceChat` keeps the earpiece.
         try session.setCategory(
             .playAndRecord,
             mode: video ? .videoChat : .voiceChat,
@@ -447,24 +501,30 @@ final class CallService: NSObject, ObservableObject {
     }
 
     #if canImport(WebRTC)
-    private func makePeerConnection() throws -> RTCPeerConnection {
-        try configureAudioSession(video: isVideoEnabled)
+    private func mediaConstraints(video: Bool) -> RTCMediaConstraints {
+        RTCMediaConstraints(
+            mandatoryConstraints: [
+                "OfferToReceiveAudio": "true",
+                "OfferToReceiveVideo": video ? "true" : "false",
+            ],
+            optionalConstraints: nil
+        )
+    }
+
+    private func makePeerConnection(video: Bool) throws -> RTCPeerConnection {
+        try configureAudioSession(video: video)
 
         let config = RTCConfiguration()
-        // STUN discovers the public address for a direct peer-to-peer path.
-        //
-        // No TURN server is configured, and that is a real functional gap:
-        // roughly 10–20% of connections — symmetric NAT, restrictive
-        // corporate networks, some mobile carriers — cannot be established
-        // without a relay. Adding TURN means running (or renting) one, and it
-        // relays the *encrypted* media, so it doesn't weaken the call.
+        // STUN only. Roughly 10–20% of connections (symmetric NAT, strict
+        // corporate/mobile networks) need a TURN relay to connect. Add one here
+        // when you have it:
+        //   RTCIceServer(urlStrings: ["turn:turn.example.com:3478"],
+        //                username: "...", credential: "...")
         config.iceServers = [RTCIceServer(urlStrings: [
             "stun:stun.l.google.com:19302",
             "stun:stun1.l.google.com:19302",
         ])]
         config.sdpSemantics = .unifiedPlan
-        // Gathers candidates over a single connection, which connects faster
-        // and uses fewer ports than the legacy behaviour.
         config.continualGatheringPolicy = .gatherContinually
 
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
@@ -495,8 +555,7 @@ final class CallService: NSObject, ObservableObject {
               let device = RTCCameraVideoCapturer.captureDevices().first(where: { $0.position == .front })
         else { return }
 
-        // 640×480 at 30 fps: enough for a video call, and low enough that the
-        // encoder keeps up on older hardware without draining the battery.
+        // ~640 px wide at up to 30 fps: enough for a call, light on battery.
         let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
         let format = formats.min { a, b in
             let da = CMVideoFormatDescriptionGetDimensions(a.formatDescription)
@@ -520,15 +579,13 @@ final class CallService: NSObject, ObservableObject {
 #if canImport(WebRTC)
 extension CallService: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        let sdp = candidate.sdp
+        let index = candidate.sdpMLineIndex
+        let mid = candidate.sdpMid
         Task { @MainActor in
             guard let conversation = self.activeConversation, let callId = self.currentCallId else { return }
             try? await self.sendHandler?(
-                .candidate(IceCandidate(
-                    callId: callId,
-                    sdp: candidate.sdp,
-                    sdpMLineIndex: candidate.sdpMLineIndex,
-                    sdpMid: candidate.sdpMid
-                )),
+                .candidate(IceCandidate(callId: callId, sdp: sdp, sdpMLineIndex: index, sdpMid: mid)),
                 conversation
             )
         }
@@ -543,14 +600,14 @@ extension CallService: RTCPeerConnectionDelegate {
                     if self.connectedAt == nil { self.connectedAt = Date() }
                 }
                 self.ringTimeoutTask?.cancel()
+                self.connectTimeoutTask?.cancel()
+                // Applied after connecting: WebRTC reconfigures the audio
+                // route while connecting and would undo an earlier override.
+                try? AVAudioSession.sharedInstance().overrideOutputAudioPort(self.isSpeakerOn ? .speaker : .none)
             case .failed:
-                // Distinguished from a hang-up so the UI can say the call
-                // dropped rather than implying someone ended it.
                 await self.endCall(reason: .failed)
             case .disconnected:
-                // Not terminal: ICE recovers from brief network changes, such
-                // as Wi-Fi to cellular. Ending here would drop calls that
-                // would have survived.
+                // Not terminal: ICE recovers from brief network changes.
                 break
             default:
                 break
@@ -558,9 +615,27 @@ extension CallService: RTCPeerConnectionDelegate {
         }
     }
 
+    /// FIX: where the remote video actually arrives (Unified Plan). This
+    /// callback was missing, so there was never a remote track to render.
+    nonisolated func peerConnection(
+        _ peerConnection: RTCPeerConnection,
+        didAdd rtpReceiver: RTCRtpReceiver,
+        streams mediaStreams: [RTCMediaStream]
+    ) {
+        guard let track = rtpReceiver.track as? RTCVideoTrack else { return }
+        Task { @MainActor in self.remoteVideoTrack = track }
+    }
+
+    /// Plan-B fallback for older peers.
+    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
+        guard let track = stream.videoTracks.first else { return }
+        Task { @MainActor in
+            if self.remoteVideoTrack == nil { self.remoteVideoTrack = track }
+        }
+    }
+
     nonisolated func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
-    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
@@ -581,13 +656,7 @@ enum CallError: LocalizedError {
 }
 
 /// Boundary for the Broadcast Upload Extension that screen sharing requires.
-///
-/// Kept as an explicit, checkable flag rather than a silent no-op, because the
-/// failure otherwise looks like "the button does nothing" — which is the kind
-/// of thing that gets debugged for an hour before someone reads the docs.
 enum ScreenShareCoordinator {
-    /// The App Group shared between app and extension. Both must declare it in
-    /// their entitlements; without it the extension cannot hand frames back.
     static let appGroupIdentifier = "group.com.hyperchat.broadcast"
 
     static var isExtensionConfigured: Bool {

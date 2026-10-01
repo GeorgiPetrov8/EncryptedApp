@@ -3,16 +3,8 @@ import GRDB
 
 /// A known user (self or a contact), as seen by **one** local account.
 ///
-/// FIX: `ownerUserId` added, and the primary key is now `(ownerUserId, id)`.
-///
-/// Pinning is a per-account trust decision. Alice deciding she trusts Bob's identity
-/// key says nothing about whether a second account on the same device should. Sharing
-/// one global `users` table conflated those, and the old `UNIQUE(username)` meant two
-/// accounts could not even hold contacts of the same name.
-///
-/// This also makes account deletion expressible: previously there was no way to say
-/// "remove the contacts *this* account pinned", so `AccountDeletionService` left them
-/// behind forever.
+/// Primary key is `(ownerUserId, id)`: pinning is a per-account trust decision,
+/// so two local accounts never share a contact row.
 struct User: Codable, Identifiable, Equatable, FetchableRecord, PersistableRecord {
     static let databaseTableName = "users"
 
@@ -20,29 +12,32 @@ struct User: Codable, Identifiable, Equatable, FetchableRecord, PersistableRecor
     var ownerUserId: String
     var id: String
     var username: String
-    /// Pinned identity agreement key (X25519).
-    ///
-    /// May be empty for a contact placeholder — a row created just to give a peer a
-    /// display name before any key exchange (Bug #11). Only `pinOrCompareIdentity`
-    /// may populate it.
+    /// Pinned identity agreement key (X25519). Empty for a contact placeholder
+    /// (Bug #11) — only `pinOrCompareIdentity` may populate it.
     var publicKey: Data
     var createdAt: Date
-
-    /// Pinned identity signing key (Ed25519). Optional only because rows written by
-    /// schema v1 predate it.
+    /// Pinned identity signing key (Ed25519).
     var identitySigningKey: Data?
-
     /// Set once the user has compared safety numbers out of band and confirmed.
     var isVerified: Bool
-
     /// Non-nil when the server presented an identity that differs from the pinned one.
-    /// While this is set, `MessagingService` refuses to establish a new session.
     var identityChangedAt: Date?
-
-    /// The unaccepted replacement keys, held so `VerifyIdentityView` can show the new
-    /// safety number before the user decides.
     var pendingIdentityAgreementKey: Data?
     var pendingIdentitySigningKey: Data?
+
+    // MARK: Profile (migration v9)
+    //
+    // FIX: the v9 migration added these columns, but this struct never
+    // declared them — GRDB silently ignores undeclared columns, so nothing
+    // could read or write a profile.
+
+    /// Name the contact chose for themselves, pushed via `ProfilePayload`.
+    var displayName: String?
+    /// File name (not path) inside the avatars directory — see `ProfileService`.
+    var avatarFileName: String?
+    /// `ProfilePayload.updatedAt` of the last profile applied; older pushes
+    /// arriving out of order are ignored.
+    var profileUpdatedAt: Date?
 
     init(
         ownerUserId: String,
@@ -54,7 +49,10 @@ struct User: Codable, Identifiable, Equatable, FetchableRecord, PersistableRecor
         isVerified: Bool = false,
         identityChangedAt: Date? = nil,
         pendingIdentityAgreementKey: Data? = nil,
-        pendingIdentitySigningKey: Data? = nil
+        pendingIdentitySigningKey: Data? = nil,
+        displayName: String? = nil,
+        avatarFileName: String? = nil,
+        profileUpdatedAt: Date? = nil
     ) {
         self.ownerUserId = ownerUserId
         self.id = id
@@ -66,14 +64,22 @@ struct User: Codable, Identifiable, Equatable, FetchableRecord, PersistableRecor
         self.identityChangedAt = identityChangedAt
         self.pendingIdentityAgreementKey = pendingIdentityAgreementKey
         self.pendingIdentitySigningKey = pendingIdentitySigningKey
+        self.displayName = displayName
+        self.avatarFileName = avatarFileName
+        self.profileUpdatedAt = profileUpdatedAt
     }
 
-    /// True when the server has offered keys we haven't accepted — the UI must block
-    /// on this rather than quietly starting a new session.
+    /// True when the server has offered keys we haven't accepted.
     var hasUnacknowledgedIdentityChange: Bool {
         identityChangedAt != nil
     }
 
     /// A placeholder has a name but no pinned key yet (Bug #11).
     var isPlaceholderContact: Bool { publicKey.isEmpty }
+
+    /// What to show for this person: their chosen name, else the username.
+    var shownName: String {
+        if let displayName, !displayName.isEmpty { return displayName }
+        return username.isEmpty ? String(id.prefix(8)) : username
+    }
 }

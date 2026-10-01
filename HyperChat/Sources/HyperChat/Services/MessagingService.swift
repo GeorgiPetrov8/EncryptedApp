@@ -50,6 +50,11 @@ final class MessagingService: ObservableObject {
     @Published private(set) var isListening = false
     @Published private(set) var isSyncing = false
 
+    /// Emits a conversation id when its messages changed locally without an
+    /// incoming message — e.g. queued messages were flushed after an
+    /// invitation was accepted, or a chat became accepted implicitly.
+    let conversationChanged = PassthroughSubject<String, Never>()
+
     private let cryptoService: CryptoService
     private let apiClient: APIClientProtocol
     private let webSocketService: WebSocketServiceProtocol
@@ -59,30 +64,20 @@ final class MessagingService: ObservableObject {
     private let userRepository: UserRepository
     private let authService: AuthService
     private let syncCursors: SyncCursorStore
-
-    /// Stored dependency because the receive path needs it too, and
-    /// `handleIncoming` is driven by a background stream, not a caller.
     private let mediaEncryptionService: MediaEncryptionService
-
-    /// Same reasoning as `mediaEncryptionService` — `.notePad` envelopes are
-    /// routed to it from `handleIncoming`.
     private let notePadService: NotePadService
 
-    /// FIX (Pack 8, Critical #1): handshakes retained until the peer replies.
     private let pendingHandshakes = PendingHandshakeStore()
-
-    /// FIX (Pack 8): serialises sends per peer.
-    ///
-    /// Two first sends to the same peer at once (a double tap, the alarm word
-    /// and a notepad edit together) used to both find `session == nil`, both
-    /// run X3DH, and the second session overwrote the first — so the peer
-    /// could never decrypt one of the two messages. Chaining each send behind
-    /// the previous one for the same peer means only the first performs the
-    /// handshake; the second finds the session already in place.
     private var sendChains: [String: Task<Void, Never>] = [:]
 
-    /// FIX (Pack 8): was `com.securechat`, so these logs didn't show up when
-    /// filtering Console by the `com.HyperChat` subsystem every other service uses.
+    // MARK: Control-message handlers (set by AppContainer)
+
+    private var deliveryHandler: ((Message, Conversation) -> Void)?
+    private var receiptHandler: ((ReceiptPayload, Conversation) -> Void)?
+    private var profileHandler: ((ProfilePayload, Conversation, String) -> Void)?
+    private var inviteHandler: ((InvitePayload, Conversation, String) -> Void)?
+    private var callHandler: ((CallSignal, Conversation, String) -> Void)?
+
     private let logger = Logger(subsystem: "com.HyperChat", category: "messaging")
     private var listenerTask: Task<Void, Never>?
 
@@ -114,7 +109,22 @@ final class MessagingService: ObservableObject {
         self.syncCursors = syncCursors
     }
 
-    /// Driven by `AppContainer`'s subscription to the active account (Bug #25).
+    func setControlHandlers(
+        delivery: @escaping (Message, Conversation) -> Void,
+        receipt: @escaping (ReceiptPayload, Conversation) -> Void,
+        profile: @escaping (ProfilePayload, Conversation, String) -> Void,
+        invite: @escaping (InvitePayload, Conversation, String) -> Void,
+        call: @escaping (CallSignal, Conversation, String) -> Void
+    ) {
+        deliveryHandler = delivery
+        receiptHandler = receipt
+        profileHandler = profile
+        inviteHandler = invite
+        callHandler = call
+    }
+
+    // MARK: Listening
+
     func startListening() {
         guard let myUserId = authService.currentUserId else {
             logger.error("startListening called with no active account; listener not started")
@@ -124,14 +134,7 @@ final class MessagingService: ObservableObject {
         listenerTask?.cancel()
         isListening = true
 
-        // FIX (Pack 8): subscribe *before* backfilling.
-        //
-        // The stream used to be created only after the backfill finished, so
-        // anything sent in between arrived through neither path and waited
-        // for the next launch. Creating the stream first opens the connection
-        // immediately and `AsyncStream` buffers envelopes while the backfill
-        // runs. The overlap is harmless: Bug #8's dedup makes redelivery
-        // idempotent.
+        // Subscribe *before* backfilling, so nothing sent in between is missed.
         let liveEvents = webSocketService.events(for: myUserId)
 
         listenerTask = Task { [weak self] in
@@ -171,7 +174,6 @@ final class MessagingService: ObservableObject {
 
     // MARK: Offline backfill (Bug #12)
 
-    /// Replays everything queued since this account's cursor, in server order.
     func backfillPendingEnvelopes(myUserId: String) async {
         isSyncing = true
         defer { isSyncing = false }
@@ -201,7 +203,6 @@ final class MessagingService: ObservableObject {
                 }
             }
 
-            // Advance only if every envelope is durably accounted for.
             if allDurable {
                 syncCursors.advance(to: page.cursor, for: myUserId)
             }
@@ -224,7 +225,6 @@ final class MessagingService: ObservableObject {
         }
     }
 
-    /// Rotates the signed prekey and publishes it (Bug #7).
     func rotateSignedPreKeyIfNeeded() async {
         guard let myUserId = authService.currentUserId else { return }
         do {
@@ -241,7 +241,6 @@ final class MessagingService: ObservableObject {
         }
     }
 
-    /// Publishes a fresh batch when the local pool runs low (Bug #1).
     func replenishOneTimePreKeysIfNeeded() async {
         guard let myUserId = authService.currentUserId else { return }
         guard cryptoService.remainingOneTimePreKeyCount < Self.oneTimePreKeyLowWaterMark else { return }
@@ -358,43 +357,24 @@ final class MessagingService: ObservableObject {
         return try userRepository.fetch(ownerUserId: myUserId, id: peerId)
     }
 
-    // MARK: Starting a conversation
+    // NOTE (invitations): `startConversation(withUsername:)` is gone on purpose.
+    // It created an `accepted` conversation and let you write to anyone
+    // directly — exactly what invitations replace. New chats go through
+    // `InvitationService.invite(username:note:)`.
 
-    func startConversation(withUsername username: String) async throws -> Conversation {
-        guard let myUserId = authService.currentUserId else { throw APIError.notAuthenticated }
+    // MARK: Invitation gate
 
-        let entry = try await apiClient.fetchDirectoryEntry(username: username)
-
-        try pinOrVerifyIdentity(
-            ownerUserId: myUserId,
-            userId: entry.userId,
-            username: entry.username,
-            agreementKey: entry.identityAgreementKey,
-            signingKey: entry.identitySigningKey
-        )
-        await ensureContact(ownerUserId: myUserId, userId: entry.userId, username: entry.username)
-
-        if let existing = try conversationRepository.findDirectConversation(
-            ownerUserId: myUserId, userA: myUserId, userB: entry.userId
-        ) {
-            return existing
-        }
-
-        let participants = [myUserId, entry.userId]
-        let conversation = Conversation(
-            id: Conversation.deterministicId(participantIds: participants),
-            ownerUserId: myUserId,
-            participantIds: participants,
-            isGroup: false,
-            createdAt: Date()
-        )
-        try conversationRepository.upsert(conversation)
-        return conversation
+    /// The conversation's *current* state from the database. The value passed
+    /// in by a view may be stale (e.g. accepted a moment ago by the other side).
+    func relationshipState(of conversation: Conversation) -> RelationshipState {
+        guard let myUserId = authService.currentUserId,
+              let fresh = try? conversationRepository.fetch(id: conversation.id, ownerUserId: myUserId)
+        else { return conversation.relationshipState }
+        return fresh.relationshipState
     }
 
     // MARK: Sending — shared transport core
 
-    /// Runs `operation` after any send already in flight to the same peer.
     private func serialized<T>(peerId: String, _ operation: @escaping () async throws -> T) async throws -> T {
         let previous = sendChains[peerId]
         let task = Task { () async throws -> T in
@@ -405,8 +385,6 @@ final class MessagingService: ObservableObject {
         return try await task.value
     }
 
-    /// Everything a chat message and a notepad sync both need: make sure a
-    /// session exists, ratchet-encrypt, persist the session, and send.
     private func transmitEnvelope(
         id envelopeId: String,
         plaintext: Data,
@@ -446,14 +424,12 @@ final class MessagingService: ObservableObject {
             throw IdentityError.identityChangeUnacknowledged(userId: peerId)
         }
 
-        /// Non-nil only when *this* call created the session.
         var createdHandshake: HandshakeInitPayload?
 
         if cryptoService.session(for: peerId) == nil {
             if let record = try sessionRepository.fetch(ownerUserId: myUserId, otherUserId: peerId) {
                 try cryptoService.restoreSession(encryptedState: record.encryptedState, for: peerId)
             } else {
-                // The one place a one-time prekey *should* be consumed.
                 let bundle = try await apiClient.fetchPreKeyBundle(forUserId: peerId)
 
                 try pinOrVerifyIdentity(
@@ -487,10 +463,6 @@ final class MessagingService: ObservableObject {
         let ratchetMessage = try session.encrypt(plaintext: plaintext)
         try persistSessionState(for: peerId, ownerUserId: myUserId)
 
-        // FIX (Pack 8, Critical #1): re-attach a handshake the peer hasn't
-        // confirmed yet, even on an envelope that would otherwise go out as
-        // plain `.ratchet`. A recipient that already has the session ignores
-        // it; one that missed the first envelope can still derive the session.
         let outgoingHandshake = createdHandshake
             ?? pendingHandshakes.pending(ownerUserId: myUserId, peerId: peerId)
         let outgoingKind: EnvelopeKind = outgoingHandshake == nil ? .ratchet : .handshake
@@ -508,8 +480,6 @@ final class MessagingService: ObservableObject {
         )
 
         if let createdHandshake {
-            // Retained *before* the send, so a lost response still leaves us
-            // able to re-attach rather than re-handshake.
             pendingHandshakes.store(createdHandshake, ownerUserId: myUserId, peerId: peerId)
         }
 
@@ -517,13 +487,6 @@ final class MessagingService: ObservableObject {
             try await apiClient.sendMessage(envelope)
         } catch {
             if createdHandshake != nil {
-                // FIX (Pack 8, Critical #1): this send created the session and
-                // its handshake never arrived. Leaving the session in place
-                // meant every later send went out as a `.ratchet` envelope with
-                // no handshake, which the peer can never decrypt — and because
-                // conversation ids are deterministic, "start a new
-                // conversation" reused the same orphaned session. Roll back so
-                // the next attempt performs a fresh X3DH.
                 rollbackHandshakeSession(peerId: peerId, ownerUserId: myUserId)
                 pendingHandshakes.clear(ownerUserId: myUserId, peerId: peerId)
             }
@@ -531,9 +494,6 @@ final class MessagingService: ObservableObject {
         }
     }
 
-    /// Removes a just-created session after its handshake failed to transmit —
-    /// from memory (what the next send sees) and from disk (what a relaunch
-    /// restores). Leaving either behind reproduces the bug.
     private func rollbackHandshakeSession(peerId: String, ownerUserId: String) {
         cryptoService.clearSession(for: peerId)
         do {
@@ -543,7 +503,6 @@ final class MessagingService: ObservableObject {
         }
     }
 
-    /// Drops every retained handshake for an account — call on account deletion.
     func clearPendingHandshakes(ownerUserId: String) {
         pendingHandshakes.clearAll(ownerUserId: ownerUserId)
     }
@@ -554,8 +513,6 @@ final class MessagingService: ObservableObject {
         try await send(plaintext: Data(text.utf8), contentType: .text, in: conversation)
     }
 
-    /// Media send path (Bug #13): encrypt and upload first, then write the
-    /// message and the media row together, then transmit.
     func sendMedia(
         rawData: Data,
         thumbnail: Data?,
@@ -565,6 +522,9 @@ final class MessagingService: ObservableObject {
         in conversation: Conversation
     ) async throws {
         guard let myUserId = authService.currentUserId else { throw APIError.notAuthenticated }
+
+        // Checked before uploading, so a blocked send doesn't upload a blob.
+        try requireCanCompose(in: conversation)
 
         let prepared = try await mediaEncryptionService.prepareForSending(
             rawData: rawData,
@@ -576,19 +536,10 @@ final class MessagingService: ObservableObject {
         )
 
         let contentType: MessageContentType
-
         switch mediaType {
-        case .image:
-            contentType = .image
-
-        case .video:
-            contentType = .video
-
-        case .audio:
-            contentType = .file
-
-        case .document:
-            contentType = .file
+        case .image: contentType = .image
+        case .video: contentType = .video
+        case .audio, .document: contentType = .file
         }
 
         try await send(
@@ -599,6 +550,16 @@ final class MessagingService: ObservableObject {
         )
     }
 
+    /// You can compose in an accepted chat and in one *you* started (queued);
+    /// not in a request you haven't accepted, nor after a decline.
+    private func requireCanCompose(in conversation: Conversation) throws {
+        switch relationshipState(of: conversation) {
+        case .accepted, .invitedByMe: return
+        case .invitedByThem: throw InvitationError.mustAcceptFirst
+        case .declined: throw InvitationError.declined
+        }
+    }
+
     func send(
         plaintext: Data,
         contentType: MessageContentType,
@@ -606,6 +567,8 @@ final class MessagingService: ObservableObject {
         media: MediaItem? = nil
     ) async throws {
         guard let myUserId = authService.currentUserId else { throw APIError.notAuthenticated }
+        try requireCanCompose(in: conversation)
+        let state = relationshipState(of: conversation)
 
         let localMessageId = UUID().uuidString
         let createdAt = Date()
@@ -623,6 +586,11 @@ final class MessagingService: ObservableObject {
         )
         try messageRepository.insert(message, media: media)
 
+        // FIX (invitations): while our invitation is pending, the message is
+        // stored with a clock and *not* transmitted. `flushQueuedMessages`
+        // sends it once they accept.
+        guard state == .accepted else { return }
+
         do {
             try await transmitEnvelope(
                 id: localMessageId,
@@ -633,27 +601,73 @@ final class MessagingService: ObservableObject {
             )
             try messageRepository.updateDeliveryStatus(messageId: localMessageId, ownerUserId: myUserId, status: .sent)
         } catch {
-            // FIX (Pack 8): `try?`, not `try`. If marking the row failed threw,
-            // it replaced the real send error — the UI then showed a database
-            // error instead of "couldn't send", and the retry logic in
-            // `ChatViewModel` lost the information it decides on.
             try? messageRepository.updateDeliveryStatus(messageId: localMessageId, ownerUserId: myUserId, status: .failed)
             throw error
         }
     }
 
-    // MARK: Sending — shared notepad
+    /// Sends everything we composed while our invitation was pending.
+    ///
+    /// Each message keeps its original id, so a repeated flush (e.g. after a
+    /// crash mid-flush) is deduplicated by the recipient's processed-envelope
+    /// check instead of producing duplicates.
+    func flushQueuedMessages(in conversation: Conversation) async {
+        guard let myUserId = authService.currentUserId,
+              relationshipState(of: conversation) == .accepted else { return }
 
-    /// The transport half of `NotePadService.apply`. Does not touch
-    /// `MessageRepository` — a notepad sync has no chat-bubble representation.
+        let queued = ((try? messageRepository.fetchMessages(
+            conversationId: conversation.id, ownerUserId: myUserId
+        )) ?? []).filter { $0.senderId == myUserId && $0.deliveryStatus == .sending }
+
+        for message in queued {
+            do {
+                let plaintext = try cryptoService.decryptFromStorage(message.encryptedContent)
+                try await transmitEnvelope(
+                    id: message.id,
+                    plaintext: plaintext,
+                    contentType: message.contentType.asEnvelopePayloadKind,
+                    in: conversation,
+                    createdAt: message.createdAt
+                )
+                try? messageRepository.updateDeliveryStatus(messageId: message.id, ownerUserId: myUserId, status: .sent)
+            } catch {
+                try? messageRepository.updateDeliveryStatus(messageId: message.id, ownerUserId: myUserId, status: .failed)
+                logger.error("Couldn't send a queued message after acceptance")
+            }
+        }
+        conversationChanged.send(conversation.id)
+    }
+
+    // MARK: Sending — control messages
+
     func sendNotePadOperation(_ operation: NotePadOperation, in conversation: Conversation) async throws {
-        let plaintext = try JSONEncoder().encode(operation)
+        try await sendControlPayload(operation, kind: .notePad, in: conversation, createdAt: operation.updatedAt)
+    }
+
+    /// One entry point for every payload that is not a chat bubble.
+    ///
+    /// FIX (invitations): everything except the invitation itself requires an
+    /// accepted conversation — otherwise the shared pad, receipts, profile
+    /// photos or a call would reach someone who never agreed to talk.
+    func sendControlPayload<T: Encodable>(
+        _ payload: T,
+        kind: EnvelopePayloadKind,
+        in conversation: Conversation,
+        createdAt: Date = Date()
+    ) async throws {
+        precondition(kind.isControlMessage, "Chat content must go through send(plaintext:...)")
+        if kind != .invite {
+            guard relationshipState(of: conversation).allowsSending else {
+                throw InvitationError.notAccepted
+            }
+        }
+        let plaintext = try JSONEncoder().encode(payload)
         try await transmitEnvelope(
             id: UUID().uuidString,
             plaintext: plaintext,
-            contentType: .notePad,
+            contentType: kind,
             in: conversation,
-            createdAt: operation.updatedAt
+            createdAt: createdAt
         )
     }
 
@@ -663,7 +677,6 @@ final class MessagingService: ObservableObject {
         guard let myUserId = authService.currentUserId else { throw ReceiveError.notAuthenticated }
         guard let identity = cryptoService.identity else { throw ReceiveError.notAuthenticated }
 
-        // Dedup before touching the ratchet (Bug #8).
         if try messageRepository.isEnvelopeProcessed(
             envelopeId: envelope.id, recipientUserId: myUserId, senderId: envelope.senderId
         ) {
@@ -714,8 +727,6 @@ final class MessagingService: ObservableObject {
         let plaintext = try session.decrypt(ratchetMessage)
         try persistSessionState(for: envelope.senderId, ownerUserId: myUserId)
 
-        // FIX (Pack 8, Critical #1): their message decrypted, so they have the
-        // session — stop re-attaching our handshake.
         pendingHandshakes.clear(ownerUserId: myUserId, peerId: envelope.senderId)
 
         await ensureContact(
@@ -724,25 +735,45 @@ final class MessagingService: ObservableObject {
             username: envelope.handshake?.senderUsername
         )
 
-        let conversation = try await resolveConversation(
+        // FIX (invitations): control traffic other than an invitation is never
+        // allowed to *create* a conversation. A receipt, profile, pad edit or
+        // call from someone we have no chat with has nothing to apply to.
+        let isControl = envelope.contentType.isControlMessage
+        if isControl && envelope.contentType != .invite {
+            guard let existing = try conversationRepository.findDirectConversation(
+                ownerUserId: myUserId, userA: myUserId, userB: envelope.senderId
+            ) else {
+                _ = try messageRepository.markEnvelopeProcessed(
+                    envelopeId: envelope.id, recipientUserId: myUserId, senderId: envelope.senderId
+                )
+                logger.debug("Dropped control traffic from someone without a conversation")
+                return
+            }
+            try handleControlMessage(envelope, plaintext: plaintext, conversation: existing, myUserId: myUserId)
+            return
+        }
+
+        var conversation = try await resolveConversation(
             with: envelope, plaintextPeerId: envelope.senderId, myUserId: myUserId
         )
 
-        // Notepad routing: no `Message` row, same replay protection.
-        if envelope.contentType == .notePad {
-            let recorded = try messageRepository.markEnvelopeProcessed(
-                envelopeId: envelope.id, recipientUserId: myUserId, senderId: envelope.senderId
-            )
-            guard recorded else {
-                logger.debug("Ignoring already-processed notepad envelope")
-                return
-            }
-            guard let operation = try? JSONDecoder().decode(NotePadOperation.self, from: plaintext) else {
-                logger.error("Notepad envelope payload didn't decode; dropping this edit")
-                return
-            }
-            notePadService.applyRemoteOperation(operation, conversationId: conversation.id, ownerUserId: myUserId)
+        if isControl {
+            // Only `.invite` reaches here.
+            try handleControlMessage(envelope, plaintext: plaintext, conversation: conversation, myUserId: myUserId)
             return
+        }
+
+        // FIX (invitations): a chat message on a conversation where *we*
+        // invited them means they accepted — even if the explicit `.accept`
+        // was lost or hasn't arrived yet. Treat it as acceptance and send what
+        // we queued, instead of leaving both sides waiting on each other.
+        if conversation.relationshipState == .invitedByMe {
+            conversation.relationshipState = .accepted
+            conversation.inviteRespondedAt = Date()
+            try conversationRepository.upsert(conversation)
+            let accepted = conversation
+            Task { await self.flushQueuedMessages(in: accepted) }
+            conversationChanged.send(conversation.id)
         }
 
         guard let messageContentType = envelope.contentType.asMessageContentType else {
@@ -784,9 +815,69 @@ final class MessagingService: ObservableObject {
         }
 
         incomingMessage = (conversation.id, message)
+        // Receipts are gated on acceptance inside `sendControlPayload`, so a
+        // message request doesn't tell the sender it was delivered.
+        deliveryHandler?(message, conversation)
     }
 
-    /// Builds the recipient's `MediaItem` for an inbound media message.
+    /// Applies a decrypted control payload. Never creates a `Message` row, but
+    /// gets the same replay protection as chat messages.
+    private func handleControlMessage(
+        _ envelope: EnvelopeDTO,
+        plaintext: Data,
+        conversation: Conversation,
+        myUserId: String
+    ) throws {
+        let recorded = try messageRepository.markEnvelopeProcessed(
+            envelopeId: envelope.id, recipientUserId: myUserId, senderId: envelope.senderId
+        )
+        guard recorded else {
+            logger.debug("Ignoring already-processed control envelope")
+            return
+        }
+
+        let decoder = JSONDecoder()
+        switch envelope.contentType {
+        case .notePad:
+            guard let operation = try? decoder.decode(NotePadOperation.self, from: plaintext) else {
+                logger.error("Notepad payload didn't decode; dropping this edit")
+                return
+            }
+            notePadService.applyRemoteOperation(operation, conversationId: conversation.id, ownerUserId: myUserId)
+
+        case .receipt:
+            guard let payload = try? decoder.decode(ReceiptPayload.self, from: plaintext) else {
+                logger.error("Receipt payload didn't decode")
+                return
+            }
+            receiptHandler?(payload, conversation)
+
+        case .profile:
+            guard let payload = try? decoder.decode(ProfilePayload.self, from: plaintext) else {
+                logger.error("Profile payload didn't decode")
+                return
+            }
+            profileHandler?(payload, conversation, envelope.senderId)
+
+        case .invite:
+            guard let payload = try? decoder.decode(InvitePayload.self, from: plaintext) else {
+                logger.error("Invitation payload didn't decode")
+                return
+            }
+            inviteHandler?(payload, conversation, envelope.senderId)
+
+        case .call:
+            guard let signal = try? decoder.decode(CallSignal.self, from: plaintext) else {
+                logger.error("Call signal didn't decode")
+                return
+            }
+            callHandler?(signal, conversation, envelope.senderId)
+
+        case .text, .image, .video, .file:
+            break // unreachable: guarded by `isControlMessage`
+        }
+    }
+
     private func makeMediaItemIfNeeded(
         plaintext: Data,
         messageContentType: MessageContentType,
@@ -797,7 +888,6 @@ final class MessagingService: ObservableObject {
         switch messageContentType {
         case .image, .video, .file:
             break
-
         case .text:
             return nil
         }
@@ -810,15 +900,11 @@ final class MessagingService: ObservableObject {
                 createdAt: createdAt
             )
         } catch {
-            logger.error(
-                "Inbound media payload didn't decode; storing the message without a media row"
-            )
+            logger.error("Inbound media payload didn't decode; storing the message without a media row")
             return nil
         }
     }
 
-    /// Logs the failure and leaves a visible marker in the conversation (Bug #9).
-    /// - Returns: whether something durable was written.
     @discardableResult
     private func handleReceiveFailure(_ error: Error, envelope: EnvelopeDTO, myUserId: String) async -> Bool {
         logger.error("""
@@ -833,11 +919,17 @@ final class MessagingService: ObservableObject {
             return false
         }
 
+        // A failed control envelope has no timeline to show a placeholder in.
+        // Mark it handled so it doesn't block the sync cursor forever.
+        if envelope.contentType.isControlMessage {
+            _ = try? messageRepository.markEnvelopeProcessed(
+                envelopeId: envelope.id, recipientUserId: myUserId, senderId: envelope.senderId
+            )
+            return true
+        }
+
         lastReceiveError = (error as? LocalizedError)?.errorDescription
             ?? ReceiveError.decryptionFailed.localizedDescription
-
-        // A failed `.notePad` envelope has no timeline to show a placeholder in.
-        guard envelope.contentType != .notePad else { return false }
 
         return await insertUndecryptablePlaceholder(for: envelope, myUserId: myUserId)
     }
@@ -875,35 +967,32 @@ final class MessagingService: ObservableObject {
         }
     }
 
-    /// The conversation id is derived, not taken from the envelope (Bug #14).
+    /// Finds the conversation with this sender, or creates one.
+    ///
+    /// FIX (invitations): a conversation created by an *inbound* envelope starts
+    /// as `invitedByThem`, not `accepted`. Someone you never accepted can't
+    /// open a normal chat with you just by sending something — it lands in
+    /// Invitations instead, and you decide.
     private func resolveConversation(
         with envelope: EnvelopeDTO,
         plaintextPeerId: String,
         myUserId: String
     ) async throws -> Conversation {
-        let participants = [myUserId, plaintextPeerId]
-        let canonicalId = Conversation.deterministicId(participantIds: participants)
-
-        if canonicalId != envelope.conversationId {
-            logger.debug("Envelope carried a non-canonical conversation id; using the derived one")
-        }
-
-        if let existing = try conversationRepository.fetch(id: canonicalId, ownerUserId: myUserId) {
+        if let existing = try conversationRepository.findDirectConversation(
+            ownerUserId: myUserId, userA: myUserId, userB: plaintextPeerId
+        ) {
             return existing
         }
 
-        if let legacy = try conversationRepository.findDirectConversation(
-            ownerUserId: myUserId, userA: myUserId, userB: plaintextPeerId
-        ) {
-            return legacy
-        }
-
+        let participants = [myUserId, plaintextPeerId]
         let conversation = Conversation(
-            id: canonicalId,
+            id: Conversation.deterministicId(participantIds: participants),
             ownerUserId: myUserId,
             participantIds: participants,
             isGroup: false,
-            createdAt: envelope.createdAt
+            createdAt: envelope.createdAt,
+            relationshipState: .invitedByThem,
+            inviteSentAt: envelope.createdAt
         )
         try conversationRepository.upsert(conversation)
         return conversation
@@ -917,34 +1006,18 @@ final class MessagingService: ObservableObject {
     // MARK: Display
 
     func mediaDisplayMetadata(for message: Message) -> MediaDisplayMetadata? {
-        guard message.carriesMediaPayload else {
+        guard message.carriesMediaPayload, !message.isUndecryptable else { return nil }
+        guard let payloadData = try? cryptoService.decryptFromStorage(message.encryptedContent),
+              let payload = try? JSONDecoder().decode(MediaKeyPayload.self, from: payloadData) else {
             return nil
         }
-
-        guard !message.isUndecryptable else {
-            return nil
-        }
-
-        guard let payloadData = try? cryptoService.decryptFromStorage(
-            message.encryptedContent
-        ) else {
-            return nil
-        }
-
-        guard let payload = try? JSONDecoder().decode(
-            MediaKeyPayload.self,
-            from: payloadData
-        ) else {
-            return nil
-        }
-
         return MediaDisplayMetadata(
             mediaType: payload.mediaType,
             duration: payload.duration,
             waveform: payload.waveform
         )
     }
-    
+
     func displayText(for message: Message) -> String {
         if message.isUndecryptable {
             return "⚠️ This message couldn't be decrypted"
@@ -958,21 +1031,15 @@ final class MessagingService: ObservableObject {
         return text
     }
 
-    /// The single place that decides what a message looks like as a
-    /// one-line summary (Bug #18).
     func previewText(for message: Message) -> String {
         if message.isUndecryptable {
             return "⚠️ Couldn't be decrypted"
         }
         switch message.contentType {
-        case .text:
-            return displayText(for: message)
-        case .image:
-            return "📷 Photo"
-        case .video:
-            return "🎥 Video"
-        case .file:
-            return "📎 File"
+        case .text: return displayText(for: message)
+        case .image: return "📷 Photo"
+        case .video: return "🎥 Video"
+        case .file: return "📎 File"
         }
     }
 

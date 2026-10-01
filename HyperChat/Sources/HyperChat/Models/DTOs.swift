@@ -28,9 +28,7 @@ struct PreKeyBundleUpload: Codable, Equatable {
     let oneTimePreKeys: [OneTimePreKeyPublic]
 }
 
-/// What the server hands out when a peer wants to start a session with a
-/// user. All fields are public keys / signatures — nothing here lets the
-/// server decrypt anything (zero-knowledge principle from the spec).
+/// What the server hands out when a peer wants to start a session.
 struct PreKeyBundle: Codable, Equatable {
     let userId: String
     let username: String
@@ -43,8 +41,7 @@ struct PreKeyBundle: Codable, Equatable {
     let oneTimePreKey: Data?
 }
 
-/// The non-destructive directory lookup (Bug #11's fix) — never consumes a
-/// one-time prekey, unlike `PreKeyBundle`.
+/// The non-destructive directory lookup — never consumes a one-time prekey.
 struct DirectoryEntry: Codable, Equatable {
     let userId: String
     let username: String
@@ -54,8 +51,6 @@ struct DirectoryEntry: Codable, Equatable {
 
 // MARK: - X3DH handshake payload
 
-/// Sent alongside the very first message in a new conversation so the
-/// responder can derive the same shared secret the initiator did.
 struct HandshakeInitPayload: Codable, Equatable {
     let identityAgreementKey: Data
     let identitySigningKey: Data
@@ -72,30 +67,9 @@ enum EnvelopeKind: String, Codable {
 
 /// What kind of plaintext an envelope's ciphertext decrypts to.
 ///
-/// FIX (shared notepad): deliberately a **separate type** from
-/// `MessageContentType`, not an added case on it.
-///
-/// `MessageContentType` is also the type of `Message.contentType` — a
-/// column on rows that get rendered as chat bubbles, previewed in the
-/// conversation list, etc. A notepad sync operation never becomes a
-/// `Message` row at all (see `MessagingService.handleIncoming`'s early
-/// return for `.notePad`), so adding it to `MessageContentType` would mean
-/// every exhaustive `switch` over that type — the bubble icon, the preview
-/// text, media-detection helpers — gains a case that can never actually
-/// occur for a persisted message, purely defensive dead code with no way
-/// for the compiler to confirm it's really unreachable.
-///
-/// Keeping them separate makes the impossible state unrepresentable
-/// instead of merely unreached: `asMessageContentType` below is the only
-/// bridge between the two, and it's `nil` for exactly the one case
-/// (`.notePad`) that should never reach message-row construction.
-/// Extends the envelope payload kinds with the control messages this pack adds.
-///
-/// Replaces the `EnvelopePayloadKind` from the notepad pack. Same design
-/// reasoning: these are *not* cases on `MessageContentType`, because none of
-/// them ever becomes a chat bubble, and adding them there would force every
-/// exhaustive switch over message content to handle states that cannot occur
-/// for a persisted message.
+/// Deliberately separate from `MessageContentType`: control payloads never
+/// become chat bubbles, so they don't belong in the type every bubble/preview
+/// `switch` has to handle.
 enum EnvelopePayloadKind: String, Codable, Equatable {
     case text
     case image
@@ -103,12 +77,16 @@ enum EnvelopePayloadKind: String, Codable, Equatable {
     case file
     /// A `NotePadOperation`.
     case notePad
-    /// FIX (feature #3): a `ReceiptPayload` — delivered/read acknowledgement.
+    /// A `ReceiptPayload` — delivered/read acknowledgement.
     case receipt
-    /// FIX (feature #4): a `ProfilePayload` — display name and avatar.
+    /// A `ProfilePayload` — display name and avatar.
     case profile
-    /// FIX (feature #6): an `InvitePayload` — contact request or its answer.
+    /// An `InvitePayload` — contact request or its answer.
     case invite
+    /// FIX (calls): a `CallSignal` — offer, answer, ICE candidate, end, update.
+    /// Travels through the Double Ratchet like everything else, so the server
+    /// can't read or swap the SDP (and with it the DTLS fingerprint).
+    case call
 
     var asMessageContentType: MessageContentType? {
         switch self {
@@ -116,26 +94,18 @@ enum EnvelopePayloadKind: String, Codable, Equatable {
         case .image: return .image
         case .video: return .video
         case .file: return .file
-        case .notePad, .receipt, .profile, .invite: return nil
+        case .notePad, .receipt, .profile, .invite, .call: return nil
         }
     }
 
-    /// Control payloads are merged into local state and never rendered in the
-    /// timeline. Grouping the test here keeps `handleIncoming` from growing a
-    /// long `if kind == .a || kind == .b ||` chain that someone forgets to
-    /// extend when a new kind is added.
+    /// Control payloads are merged into local state and never rendered in
+    /// the timeline.
     var isControlMessage: Bool {
         asMessageContentType == nil
     }
 }
 
 extension MessageContentType {
-    /// The inverse of `EnvelopePayloadKind.asMessageContentType`. Total —
-    /// every `MessageContentType` has a corresponding wire representation —
-    /// because only `.notePad` is one-directional, and that direction never
-    /// starts from a `MessageContentType` in the first place (nothing
-    /// constructs a `Message` to *become* a notepad sync; it's the other
-    /// way around, see `MessagingService.sendNotePadOperation`).
     var asEnvelopePayloadKind: EnvelopePayloadKind {
         switch self {
         case .text: return .text
@@ -155,11 +125,6 @@ struct EnvelopeDTO: Codable, Equatable {
     let kind: EnvelopeKind
     let handshake: HandshakeInitPayload?
     let ratchetMessage: Data
-    /// FIX (shared notepad): was `MessageContentType`, now
-    /// `EnvelopePayloadKind` — see that type's doc comment for why.
-    /// Wire-compatible: both encode to the same four lowercase strings for
-    /// every case they share, and the server's `validate.js` allow-list
-    /// checks the raw string regardless of which Swift enum backs it.
     let contentType: EnvelopePayloadKind
     let createdAt: Date
 }

@@ -4,103 +4,125 @@ import os
 
 /// Tracks which contacts are currently in the app.
 ///
-/// ## Why this goes through the server rather than end-to-end
+/// Goes through the server rather than end-to-end: the server already knows
+/// who holds an open socket. What's controlled is *who it tells* — only
+/// mutual, accepted contacts, and only while this user is visible (app in the
+/// foreground AND "show when I'm online" on). Both are enforced server-side.
 ///
-/// Every other payload in this app is encrypted so the server learns nothing.
-/// Presence is the exception, and deliberately so: the server *already* knows
-/// who holds an open WebSocket — that's how live delivery works at all. Routing
-/// presence peer-to-peer would encrypt a fact the server can observe directly
-/// by looking at its own connection table, which buys no privacy and costs a
-/// ratchet step per status change.
+/// When someone isn't online, **nothing** is shown — no "last seen".
 ///
-/// What *is* worth controlling is who the server tells. A user only appears
-/// online to accepted contacts, and only if they haven't turned presence off —
-/// both enforced server-side, since a client-side filter would be cosmetic.
-///
-/// ## Matching the WhatsApp behaviour that was asked for
-///
-/// Online shows while the app is foregrounded. When it isn't, **nothing** is
-/// shown — not "last seen 10 minutes ago". That was the explicit request, and
-/// it's also the better default: a last-seen timestamp is a surprisingly
-/// sensitive signal (it reveals sleep schedules and daily routine) and is the
-/// single most-regretted feature in most messengers that shipped it.
+/// FIX: this service existed but was never constructed or started, its
+/// transport hooks were protocol-extension no-ops, and it never told the
+/// server who its contacts were — so the server had nobody to report.
 @MainActor
 final class PresenceService: ObservableObject {
-
-    /// User ids currently online. Absence means "not online", which the UI
-    /// renders as nothing at all rather than as "offline".
+    /// User ids currently online.
     @Published private(set) var onlineUserIds: Set<String> = []
 
-    /// Whether this user broadcasts their own presence. Local preference,
-    /// pushed to the server, which stops telling anyone when it's off.
+    /// Whether this user broadcasts their own presence.
     @Published var isSharingPresence: Bool {
         didSet {
             UserDefaults.standard.set(isSharingPresence, forKey: Keys.sharing)
-            Task { await pushPreference() }
+            pushState()
         }
     }
 
     private let webSocketService: WebSocketServiceProtocol
     private let authService: AuthService
+    private let conversationRepository: ConversationRepository
     private let logger = Logger(subsystem: "com.HyperChat", category: "presence")
+
     private var listenerTask: Task<Void, Never>?
+    private var contacts: [String] = []
+    private var isAppActive = true
 
     private enum Keys {
         static let sharing = "presence.isSharing"
     }
 
-    init(webSocketService: WebSocketServiceProtocol, authService: AuthService) {
+    init(
+        webSocketService: WebSocketServiceProtocol,
+        authService: AuthService,
+        conversationRepository: ConversationRepository
+    ) {
         self.webSocketService = webSocketService
         self.authService = authService
-        // Defaults to on, matching the messengers users are coming from.
-        // `object(forKey:)` rather than `bool(forKey:)` so "never set" is
-        // distinguishable from "explicitly set to false".
+        self.conversationRepository = conversationRepository
         self.isSharingPresence = (UserDefaults.standard.object(forKey: Keys.sharing) as? Bool) ?? true
     }
 
-    /// Begins consuming presence frames.
-    ///
-    /// Reuses the existing socket instead of opening a second one — a separate
-    /// presence connection would double the server's connection count and, on
-    /// mobile, roughly double the radio wake-ups.
-    func start(onPresenceFrame stream: AsyncStream<PresenceFrame>) {
+    // MARK: Lifecycle
+
+    /// Call **before** `MessagingService.startListening()` — the presence stream
+    /// must exist before the socket connects, or the snapshot the server sends
+    /// right after authentication has nowhere to go.
+    func start() {
         listenerTask?.cancel()
+        onlineUserIds = []
+        let frames = webSocketService.presenceFrames()
         listenerTask = Task { [weak self] in
-            for await frame in stream {
-                await self?.apply(frame)
+            for await frame in frames {
+                self?.apply(frame)
             }
         }
-        Task { await pushPreference() }
+        refreshContacts()
     }
 
     func stop() {
         listenerTask?.cancel()
         listenerTask = nil
-        // Cleared on stop so a signed-out account's contacts don't linger as
-        // "online" behind the login screen.
+        contacts = []
         onlineUserIds = []
+    }
+
+    /// Foreground/background, from the App's `scenePhase`.
+    func setAppActive(_ active: Bool) {
+        guard isAppActive != active else { return }
+        isAppActive = active
+        pushState()
+    }
+
+    /// Re-reads which peers we have accepted conversations with. Call when a
+    /// conversation appears or an invitation is accepted.
+    func refreshContacts() {
+        guard let myUserId = authService.currentUserId else { return }
+        do {
+            let conversations = try conversationRepository.fetchAllSortedByRecentActivity(ownerUserId: myUserId)
+            let peers = conversations
+                .filter { $0.relationshipState.allowsSending }
+                .compactMap { $0.otherParticipant(myUserId: myUserId) }
+            let unique = Array(Set(peers)).sorted()
+            guard unique != contacts else { return }
+            contacts = unique
+            pushState()
+        } catch {
+            logger.error("Couldn't read conversations for presence")
+        }
     }
 
     func isOnline(_ userId: String) -> Bool {
         onlineUserIds.contains(userId)
     }
 
+    // MARK: Private
+
+    private func pushState() {
+        guard authService.currentUserId != nil else { return }
+        webSocketService.updatePresence(
+            contacts: contacts,
+            isVisible: isSharingPresence && isAppActive
+        )
+    }
+
     private func apply(_ frame: PresenceFrame) {
         switch frame.kind {
         case .snapshot:
-            // Sent once on connect: the authoritative set, which also corrects
-            // any drift from missed deltas during a flaky connection.
             onlineUserIds = Set(frame.userIds)
         case .online:
             onlineUserIds.formUnion(frame.userIds)
         case .offline:
             onlineUserIds.subtract(frame.userIds)
         }
-    }
-
-    private func pushPreference() async {
-        guard authService.currentUserId != nil else { return }
-        webSocketService.sendPresencePreference(isSharing: isSharingPresence)
     }
 }
 
@@ -116,12 +138,6 @@ struct PresenceFrame: Codable, Equatable {
     let userIds: [String]
 }
 
-extension WebSocketServiceProtocol {
-    /// Default no-op so the mock transport — which has no presence concept —
-    /// still satisfies the protocol without every implementation having to
-    /// care about presence.
-    func sendPresencePreference(isSharing: Bool) {}
-    func presenceFrames() -> AsyncStream<PresenceFrame> {
-        AsyncStream { $0.finish() }
-    }
-}
+// NOTE: the protocol extension with no-op `sendPresencePreference` /
+// `presenceFrames` that used to live here is intentionally gone — those are
+// now real requirements on `WebSocketServiceProtocol`.

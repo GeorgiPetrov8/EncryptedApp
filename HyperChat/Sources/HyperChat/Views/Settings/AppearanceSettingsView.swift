@@ -1,16 +1,16 @@
 import SwiftUI
 import PhotosUI
 
-/// Picks a background, either globally or for one conversation.
+/// Picks a background for all chats, one chat, or the chats list.
 ///
-/// Shows a live preview with real bubbles, because what the user needs to
-/// judge is "can I read my messages on this", which a swatch doesn't answer.
+/// The preview shows the real bars (header notch and composer) in the colour
+/// that will be derived from the background, so the user sees exactly how
+/// names and buttons will read before saving.
 struct AppearanceSettingsView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
 
-    /// `nil` edits the global default; non-nil edits one conversation.
-    let conversationId: String?
+    let scope: AppearanceScope
 
     @State private var draft: ChatAppearance = .default
     @State private var red: Double = 0.2
@@ -19,7 +19,17 @@ struct AppearanceSettingsView: View {
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var errorMessage: String?
 
+    init(scope: AppearanceScope) {
+        self.scope = scope
+    }
+
+    /// Kept for existing call sites: `nil` = all chats.
+    init(conversationId: String?) {
+        self.scope = conversationId.map { .conversation($0) } ?? .allChats
+    }
+
     private var store: AppearanceStore { container.appearanceStore }
+    private var chrome: ChromeStyle { store.chrome(for: draft) }
 
     var body: some View {
         NavigationStack {
@@ -35,13 +45,11 @@ struct AppearanceSettingsView: View {
                     } label: {
                         Label("System default", systemImage: "circle.lefthalf.filled")
                     }
-
                     Button {
                         draft.background = .solid(red: red, green: green, blue: blue)
                     } label: {
                         Label("Solid colour", systemImage: "paintpalette")
                     }
-
                     PhotosPicker(selection: $selectedPhoto, matching: .images) {
                         Label("Photo", systemImage: "photo")
                     }
@@ -59,19 +67,25 @@ struct AppearanceSettingsView: View {
                 if case .image = draft.background {
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Dimming \(Int(dimming * 100))%")
+                            Text("Dimming \(Int(draft.effectiveScrimOpacity * 100))%")
                                 .font(.subheadline)
                             Slider(value: dimmingBinding, in: ContrastPolicy.minimumDarkScrimOpacity...0.9)
                         }
                     } footer: {
-                        Text("Photos are dimmed so message text stays readable. The minimum dimming can't be removed — over a bright photo, undimmed text becomes unreadable.")
+                        Text("Photos are dimmed so text stays readable. The minimum dimming can't be removed.")
                     }
                 }
 
-                if let conversationId, store.hasOverride(for: conversationId) {
+                Section {
+                    Text("The bars at the top and bottom take a colour close to the background, and their text is always picked to stay readable.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if store.hasOverride(scope: scope) {
                     Section {
-                        Button("Use the global background", role: .destructive) {
-                            store.clearOverride(for: conversationId)
+                        Button(resetTitle, role: .destructive) {
+                            store.clear(scope: scope)
                             dismiss()
                         }
                     }
@@ -83,7 +97,7 @@ struct AppearanceSettingsView: View {
                     }
                 }
             }
-            .navigationTitle(conversationId == nil ? "Chat Background" : "This Chat")
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -104,14 +118,20 @@ struct AppearanceSettingsView: View {
         }
     }
 
-    // MARK: Dimming
-    //
-    // FIX: the slider used to be bound straight to `bubbleOpacity`, while the
-    // scrim actually drawn is `max(floor, 1 - bubbleOpacity)`. Dragging right
-    // therefore *reduced* dimming, and most of the range did nothing because
-    // it sat below the floor. It now edits the effective dimming directly.
+    private var title: String {
+        switch scope {
+        case .allChats: return "Chat Background"
+        case .chatList: return "Chats List Background"
+        case .conversation: return "This Chat"
+        }
+    }
 
-    private var dimming: Double { draft.effectiveScrimOpacity }
+    private var resetTitle: String {
+        switch scope {
+        case .allChats, .chatList: return "Use the default"
+        case .conversation: return "Use the global chat background"
+        }
+    }
 
     private var dimmingBinding: Binding<Double> {
         Binding(
@@ -125,16 +145,50 @@ struct AppearanceSettingsView: View {
     private var preview: some View {
         ZStack {
             ChatBackgroundView(appearance: draft) { store.imageURL(fileName: $0) }
-                .frame(height: 180)
+                .frame(height: 240)
                 .clipped()
 
-            VStack(alignment: .leading, spacing: 8) {
-                bubble("Are we still on for tonight?", isMine: false)
-                bubble("Yes — see you at eight.", isMine: true)
+            VStack(spacing: 10) {
+                // A miniature header notch, in the derived colour.
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.left")
+                    Circle().fill(.gray).frame(width: 24, height: 24)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Maria").font(.subheadline.bold())
+                        Text("online").font(.caption2.weight(.medium))
+                    }
+                    Spacer()
+                    Image(systemName: "phone")
+                    Image(systemName: "ellipsis.circle")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .notchStyle(chrome, cornerRadius: 18)
+
+                if scope == .chatList {
+                    listRow("Maria", "See you at eight")
+                    listRow("Alex", "📷 Photo")
+                } else {
+                    bubble("Are we still on for tonight?", isMine: false)
+                    bubble("Yes — see you at eight.", isMine: true)
+                }
+
+                Spacer(minLength: 0)
+
+                if scope != .chatList {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle.fill")
+                        Capsule().fill(.background).frame(height: 28)
+                        Image(systemName: "mic")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .notchStyle(chrome, cornerRadius: 18)
+                }
             }
-            .padding()
+            .padding(12)
         }
-        .frame(height: 180)
+        .frame(height: 240)
     }
 
     private func bubble(_ text: String, isMine: Bool) -> some View {
@@ -151,6 +205,19 @@ struct AppearanceSettingsView: View {
         }
     }
 
+    private func listRow(_ name: String, _ preview: String) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(.gray).frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(name).font(.subheadline.bold())
+                Text(preview).font(.caption)
+            }
+            Spacer()
+        }
+        .padding(8)
+        .notchStyle(chrome, cornerRadius: 14)
+    }
+
     // MARK: Contrast readout
 
     private var contrastReadout: some View {
@@ -164,9 +231,7 @@ struct AppearanceSettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Text contrast \(String(format: "%.1f", ratio)):1")
                     .font(.footnote)
-                Text(draft.prefersLightForeground
-                     ? "Light text chosen automatically."
-                     : "Dark text chosen automatically.")
+                Text(draft.prefersLightForeground ? "Light text chosen automatically." : "Dark text chosen automatically.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -185,7 +250,7 @@ struct AppearanceSettingsView: View {
     // MARK: Actions
 
     private func loadDraft() {
-        draft = store.appearance(for: conversationId)
+        draft = store.appearance(scope: scope)
         if case .solid(let r, let g, let b) = draft.background {
             red = r; green = g; blue = b
         }
@@ -213,11 +278,7 @@ struct AppearanceSettingsView: View {
     }
 
     private func save() {
-        if let conversationId {
-            store.setAppearance(draft, for: conversationId)
-        } else {
-            store.setGlobal(draft)
-        }
+        store.set(draft, scope: scope)
         dismiss()
     }
 }

@@ -3,33 +3,23 @@ import os
 
 /// Real-time delivery over `URLSessionWebSocketTask`.
 ///
-/// Authentication happens as the **first message** after the socket opens —
-/// `{"type":"auth","token":"..."}` — rather than a `?token=` query parameter,
-/// which would end up in every intermediary's access log.
-///
-/// FIX (online status):
-///   - frames are dispatched by `type`: `envelope` goes to the message stream,
-///     `presence` to the presence stream. Previously every non-envelope frame
-///     was logged and dropped.
-///   - after each successful auth the remembered contact list and visibility
-///     are (re)sent, so presence survives reconnects.
+/// Authentication is the first message after the socket opens, not a URL
+/// query parameter (which would end up in proxy access logs).
 final class RealWebSocketService: WebSocketServiceProtocol {
     private let webSocketURL: URL
     private let session: URLSession
     private let tokenStore: SessionTokenStore
     private let logger = Logger(subsystem: "com.HyperChat", category: "websocket")
 
-    /// Per-account cancellation flags, so `disconnect(userId:)` stops the
-    /// reconnect loop rather than just closing the current socket.
-    private var cancelled: [String: Bool] = [:]
+    /// All guarded by `lock`.
     private let lock = NSLock()
-
-    // Presence state — all guarded by `lock`.
+    private var cancelled: [String: Bool] = [:]
     private var presenceContinuation: AsyncStream<PresenceFrame>.Continuation?
     private var presenceGeneration = 0
     private var currentTask: URLSessionWebSocketTask?
     private var presenceContacts: [String] = []
     private var presenceVisible = true
+    private var reconnectHandler: (@Sendable () -> Void)?
 
     init(
         webSocketURL: URL = NetworkConfiguration.webSocketURL,
@@ -59,6 +49,18 @@ final class RealWebSocketService: WebSocketServiceProtocol {
 
     func disconnect(userId: String) {
         setCancelled(true, for: userId)
+        lock.lock()
+        let task = currentTask
+        lock.unlock()
+        // Closing the socket ends the pending `receive()` right away, instead
+        // of the loop noticing the flag only when the next frame arrives.
+        task?.cancel(with: .goingAway, reason: nil)
+    }
+
+    func setReconnectHandler(_ handler: @escaping @Sendable () -> Void) {
+        lock.lock()
+        reconnectHandler = handler
+        lock.unlock()
     }
 
     func presenceFrames() -> AsyncStream<PresenceFrame> {
@@ -73,7 +75,6 @@ final class RealWebSocketService: WebSocketServiceProtocol {
             continuation.onTermination = { [weak self] _ in
                 guard let self else { return }
                 self.lock.lock()
-                // Only clear if a newer stream hasn't replaced this one.
                 if self.presenceGeneration == generation {
                     self.presenceContinuation = nil
                 }
@@ -89,7 +90,6 @@ final class RealWebSocketService: WebSocketServiceProtocol {
         let task = currentTask
         lock.unlock()
 
-        // If not connected, the state is sent right after the next auth.
         guard let task else { return }
         Task { await self.sendPresenceState(on: task) }
     }
@@ -108,14 +108,17 @@ final class RealWebSocketService: WebSocketServiceProtocol {
 
     // MARK: Connection loop
 
-    /// Connects, authenticates, relays frames until the connection drops, then
-    /// reconnects with exponential backoff (capped at 30s).
     private func runReconnectLoop(userId: String, continuation: AsyncStream<EnvelopeDTO>.Continuation) async {
         var backoff: UInt64 = 1
+        var connectionCount = 0
         while !isCancelled(userId) && !Task.isCancelled {
             do {
-                try await runOneConnection(userId: userId, continuation: continuation)
-                backoff = 1
+                try await runOneConnection(userId: userId, continuation: continuation) {
+                    // Runs right after authentication succeeds.
+                    connectionCount += 1
+                    backoff = 1
+                    if connectionCount > 1 { self.notifyReconnected() }
+                }
             } catch {
                 logger.error("WebSocket connection ended: \(String(describing: error), privacy: .public)")
             }
@@ -126,9 +129,18 @@ final class RealWebSocketService: WebSocketServiceProtocol {
         continuation.finish()
     }
 
+    private func notifyReconnected() {
+        lock.lock()
+        let handler = reconnectHandler
+        lock.unlock()
+        logger.info("WebSocket reconnected; requesting backfill")
+        handler?()
+    }
+
     private func runOneConnection(
         userId: String,
-        continuation: AsyncStream<EnvelopeDTO>.Continuation
+        continuation: AsyncStream<EnvelopeDTO>.Continuation,
+        onAuthenticated: () -> Void
     ) async throws {
         guard let token = tokenStore.currentToken else {
             throw NetworkError.missingSessionToken
@@ -150,9 +162,8 @@ final class RealWebSocketService: WebSocketServiceProtocol {
         currentTask = task
         lock.unlock()
 
-        // The server replies to the contacts frame with a presence snapshot.
+        onAuthenticated()
         await sendPresenceState(on: task)
-
         try await receiveLoop(task, userId: userId, continuation: continuation)
     }
 
@@ -213,8 +224,7 @@ final class RealWebSocketService: WebSocketServiceProtocol {
 
     private func send<T: Encodable>(_ task: URLSessionWebSocketTask, _ value: T) async throws {
         let data = try HyperChatJSON.encoder.encode(value)
-        let text = String(decoding: data, as: UTF8.self)
-        try await task.send(.string(text))
+        try await task.send(.string(String(decoding: data, as: UTF8.self)))
     }
 }
 

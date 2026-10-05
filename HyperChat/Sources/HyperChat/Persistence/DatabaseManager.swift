@@ -4,12 +4,8 @@ import os
 
 /// Owns the SQLite connection and schema migrations.
 ///
-/// Design note on "encrypted database": the original spec calls for
-/// SQLCipher (whole-file encryption). SQLCipher requires linking a custom
-/// OpenSSL-backed SQLite build, which is a heavier dependency than fits a
-/// scaffold. Instead, this project layers iOS Data Protection on the
-/// database files with application-level AES-256-GCM encryption of every
-/// sensitive column.
+/// iOS Data Protection on the database files, plus application-level
+/// AES-256-GCM encryption of every sensitive column.
 final class DatabaseManager {
     let dbQueue: DatabaseQueue
     private let databaseURL: URL
@@ -22,9 +18,6 @@ final class DatabaseManager {
             appropriateFor: nil,
             create: true
         )
-
-        // Protect the directory before the database exists, so files created
-        // inside inherit the class (Bug #22).
         try Self.applyFileProtection(to: folder)
 
         let dbURL = folder.appendingPathComponent(fileName)
@@ -40,8 +33,6 @@ final class DatabaseManager {
 
         Self.applyFileProtectionToDatabaseFiles(at: dbURL)
         try Self.migrator.migrate(dbQueue)
-
-        // Migrations can create or recreate the WAL/SHM files.
         Self.applyFileProtectionToDatabaseFiles(at: dbURL)
 
         #if DEBUG
@@ -71,11 +62,7 @@ final class DatabaseManager {
             do {
                 try applyFileProtection(to: url)
             } catch {
-                logger.error("""
-                    Couldn't apply file protection to \
-                    \(url.lastPathComponent, privacy: .public): \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
+                logger.error("Couldn't apply file protection to \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -83,8 +70,6 @@ final class DatabaseManager {
     #if DEBUG
     private static func assertFileProtectionCoversAllDatabaseFiles(at dbURL: URL) {
         #if targetEnvironment(simulator)
-        // The Simulator doesn't reliably model iOS Data Protection:
-        // `protectionKey` can read back nil even after a successful set.
         logger.debug("Skipping file-protection assertion in Simulator")
         return
         #else
@@ -92,7 +77,6 @@ final class DatabaseManager {
             do {
                 let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
                 let attribute = attributes[.protectionKey]
-
                 let protection: FileProtectionType?
                 if let value = attribute as? FileProtectionType {
                     protection = value
@@ -101,7 +85,6 @@ final class DatabaseManager {
                 } else {
                     protection = nil
                 }
-
                 assert(
                     protection == .completeUntilFirstUserAuthentication,
                     "Unprotected database file: \(url.lastPathComponent); protection: \(String(describing: attribute))"
@@ -113,8 +96,6 @@ final class DatabaseManager {
         #endif
     }
 
-    /// A second, independent check that catches a typo'd or
-    /// accidentally-removed migration registration.
     private static func assertExpectedMigrationsApplied(_ dbQueue: DatabaseQueue) throws {
         let applied = try dbQueue.read { db in try migrator.appliedIdentifiers(db) }
         for expected in expectedMigrationIdentifiers {
@@ -132,6 +113,7 @@ final class DatabaseManager {
         "v7_shared_note_pad",
         "v8_alarms",
         "v9_receipts_presence_invites",
+        "v10_message_edits",
     ]
     #endif
 
@@ -145,14 +127,12 @@ final class DatabaseManager {
                 t.column("publicKey", .blob).notNull()
                 t.column("createdAt", .datetime).notNull()
             }
-
             try db.create(table: "conversations") { t in
                 t.column("id", .text).primaryKey()
                 t.column("participantIds", .text).notNull()
                 t.column("isGroup", .boolean).notNull().defaults(to: false)
                 t.column("createdAt", .datetime).notNull()
             }
-
             try db.create(table: "messages") { t in
                 t.column("id", .text).primaryKey()
                 t.column("conversationId", .text).notNull().indexed()
@@ -163,7 +143,6 @@ final class DatabaseManager {
                 t.column("deliveryStatus", .text).notNull()
                 t.column("createdAt", .datetime).notNull()
             }
-
             try db.create(table: "media") { t in
                 t.column("id", .text).primaryKey()
                 t.column("messageId", .text).notNull().indexed()
@@ -174,7 +153,6 @@ final class DatabaseManager {
                 t.column("mediaType", .text).notNull()
                 t.column("createdAt", .datetime).notNull()
             }
-
             try db.create(table: "sessions") { t in
                 t.column("id", .text).primaryKey()
                 t.column("otherUserId", .text).notNull().unique()
@@ -184,7 +162,6 @@ final class DatabaseManager {
             }
         }
 
-        /// Identity pinning / verification columns (Bug #2).
         migrator.registerMigration("v2_identity_verification") { db in
             try db.alter(table: "users") { t in
                 t.add(column: "identitySigningKey", .blob)
@@ -195,7 +172,6 @@ final class DatabaseManager {
             }
         }
 
-        /// Replay protection and per-account data scoping (Bugs #8, #10).
         migrator.registerMigration("v3_account_scoping_and_replay_protection") { db in
             try db.alter(table: "conversations") { t in
                 t.add(column: "ownerUserId", .text).notNull().defaults(to: "")
@@ -237,7 +213,6 @@ final class DatabaseManager {
             try db.create(index: "idx_processed_envelopes_receivedAt", on: "processed_envelopes", columns: ["receivedAt"])
         }
 
-        /// Activity ordering and media ownership (Bugs #15, #23).
         migrator.registerMigration("v4_activity_ordering_and_media_ownership") { db in
             try db.alter(table: "conversations") { t in
                 t.add(column: "lastMessageAt", .datetime)
@@ -253,18 +228,14 @@ final class DatabaseManager {
                 on: "conversations",
                 columns: ["ownerUserId", "lastMessageAt"]
             )
-
             try db.alter(table: "media") { t in
                 t.add(column: "ownerUserId", .text).notNull().defaults(to: "")
             }
             try db.create(index: "idx_media_owner", on: "media", columns: ["ownerUserId"])
-
             try db.execute(sql: "DELETE FROM media WHERE messageId = '' OR messageId IS NULL")
         }
 
-        /// Composite primary keys for `users`, `conversations` and `messages`.
         migrator.registerMigration("v5_composite_primary_keys", foreignKeyChecks: .deferred) { db in
-
             try db.create(table: "users_new") { t in
                 t.column("ownerUserId", .text).notNull()
                 t.column("id", .text).notNull()
@@ -279,7 +250,6 @@ final class DatabaseManager {
                 t.primaryKey(["ownerUserId", "id"])
                 t.uniqueKey(["ownerUserId", "username"])
             }
-
             try db.execute(sql: """
                 INSERT OR IGNORE INTO users_new
                     (ownerUserId, id, username, publicKey, createdAt, identitySigningKey,
@@ -380,8 +350,6 @@ final class DatabaseManager {
             try db.create(index: "idx_media_message", on: "media", columns: ["ownerUserId", "messageId"])
         }
 
-        /// `media` gets a composite primary key too — two accounts caching
-        /// the same server-assigned blob each need their own row.
         migrator.registerMigration("v6_media_composite_primary_key", foreignKeyChecks: .deferred) { db in
             try db.create(table: "media_v6") { t in
                 t.column("ownerUserId", .text).notNull()
@@ -400,23 +368,19 @@ final class DatabaseManager {
                     onDelete: .cascade
                 )
             }
-
             try db.execute(sql: """
                 INSERT INTO media_v6
                     (ownerUserId, id, messageId, encryptedFilePath, encryptedThumbnail, fileSize, mediaType, createdAt)
                 SELECT ownerUserId, id, messageId, encryptedFilePath, encryptedThumbnail, fileSize, mediaType, createdAt
                 FROM media
                 """)
-
             try db.drop(table: "media")
             try db.rename(table: "media_v6", to: "media")
-
             try db.create(index: "idx_media_owner", on: "media", columns: ["ownerUserId"])
             try db.create(index: "idx_media_owner_message", on: "media", columns: ["ownerUserId", "messageId"])
             try db.create(index: "idx_media_id", on: "media", columns: ["id"])
         }
 
-        /// The shared note/todo/buy pad's storage.
         migrator.registerMigration("v7_shared_note_pad") { db in
             try db.create(table: "note_pad_items") { t in
                 t.column("ownerUserId", .text).notNull()
@@ -442,8 +406,6 @@ final class DatabaseManager {
             )
         }
 
-        /// Alarm storage. `accountabilityPeerId` deliberately has no foreign
-        /// key to `users` — a cascade would silently delete the alarm.
         migrator.registerMigration("v8_alarms") { db in
             try db.create(table: "alarms") { t in
                 t.column("ownerUserId", .text).notNull()
@@ -452,7 +414,6 @@ final class DatabaseManager {
                 t.column("minute", .integer).notNull()
                 t.column("isEnabled", .boolean).notNull().defaults(to: true)
                 t.column("label", .text).notNull().defaults(to: "Alarm")
-                // JSON array of Calendar weekday values (1 = Sunday).
                 t.column("repeatWeekdays", .text).notNull().defaults(to: "[]")
                 t.column("dismissalMode", .text).notNull().defaults(to: "tasks")
                 t.column("accountabilityPeerId", .text)
@@ -469,33 +430,16 @@ final class DatabaseManager {
             )
         }
 
-        /// FIX (Pack 8): schema for receipts, profiles and invitations.
-        ///
-        /// Registered directly here — not left as a "remember to wire this up"
-        /// snippet, which is exactly how v6 once went missing.
-        ///
-        /// Schema only: the models don't declare these columns yet, which is
-        /// safe because GRDB ignores undeclared columns on read and inserts
-        /// fall back to the column defaults.
         migrator.registerMigration("v9_receipts_presence_invites") { db in
-            // Receipts: nullable, not defaulted — "never delivered" and
-            // "delivered at epoch" are different facts.
             try db.alter(table: "messages") { t in
                 t.add(column: "deliveredAt", .datetime)
                 t.add(column: "readAt", .datetime)
             }
-
-            // Profiles: on the already per-account `users` table, so avatars
-            // inherit the same account isolation as pinned identity keys.
             try db.alter(table: "users") { t in
                 t.add(column: "displayName", .text)
                 t.add(column: "avatarFileName", .text)
                 t.add(column: "profileUpdatedAt", .datetime)
             }
-
-            // Invitations: defaults to 'accepted' so every existing
-            // conversation keeps working — treating them as pending would lock
-            // users out of their own history on upgrade.
             try db.alter(table: "conversations") { t in
                 t.add(column: "relationshipState", .text).notNull().defaults(to: "accepted")
                 t.add(column: "inviteNote", .text)
@@ -507,6 +451,14 @@ final class DatabaseManager {
                 on: "conversations",
                 columns: ["ownerUserId", "relationshipState"]
             )
+        }
+
+        /// Message editing. Replies need no column: the quote travels inside the
+        /// encrypted `TextPayload`.
+        migrator.registerMigration("v10_message_edits") { db in
+            try db.alter(table: "messages") { t in
+                t.add(column: "editedAt", .datetime)
+            }
         }
 
         return migrator

@@ -17,27 +17,20 @@ final class NotePadViewModel: ObservableObject {
         notePadService.loadItems(for: conversation)
         items = notePadService.items(for: conversation.id)
 
-        // Live updates: `itemsByConversation` changes when a remote operation
-        // arrives or a local one is applied, so a peer ticking something off
-        // shows up while this screen is open.
         cancellable = notePadService.$itemsByConversation
             .map { $0[conversation.id] ?? [] }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.items = $0 }
 
-        // Re-sends anything that failed to transmit while offline. Safe to do
-        // on every open because the merge is idempotent — see
-        // `NotePadService.resyncOwnItems`.
-        Task { await notePadService.resyncOwnItems(in: conversation) }
+        // Sends only edits that didn't go out earlier (offline etc.).
+        Task { await notePadService.flushPending(in: conversation) }
     }
 
     private var liveItems: [NotePadItem] {
         items.filter { !$0.isDeleted }
     }
 
-    /// Kept separate rather than one sorted list, so the two groups can have
-    /// different delete affordances — see `NotePadView`.
     var outstandingItems: [NotePadItem] {
         liveItems.filter { !$0.isDone }.sorted { $0.updatedAt < $1.updatedAt }
     }
@@ -46,7 +39,6 @@ final class NotePadViewModel: ObservableObject {
         liveItems.filter(\.isDone).sorted { $0.updatedAt < $1.updatedAt }
     }
 
-    /// Retained for the badge count in `ChatView`.
     var visibleItems: [NotePadItem] { outstandingItems + completedItems }
 
     var remainingCount: Int { outstandingItems.count }
@@ -84,7 +76,6 @@ final class NotePadViewModel: ObservableObject {
         }
     }
 
-    /// Bulk-clears finished items.
     func deleteCompleted() {
         for item in completedItems { delete(item) }
     }

@@ -2,7 +2,9 @@ import SwiftUI
 
 struct LoginView: View {
     @ObservedObject var viewModel: AuthViewModel
-
+    @EnvironmentObject private var container: AppContainer
+    @State private var showRestore = false
+    
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
@@ -49,6 +51,14 @@ struct LoginView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!viewModel.canSubmitLogin)
+                
+                Button("Restore account") {
+                    showRestore = true
+                }
+                .sheet(isPresented: $showRestore) {
+                    RestoreAccountView()
+                        .environmentObject(container)
+                }
             }
             .padding()
         }

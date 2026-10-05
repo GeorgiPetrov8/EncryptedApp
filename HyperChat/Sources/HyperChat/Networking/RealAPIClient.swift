@@ -1,10 +1,7 @@
 import Foundation
 import os
 
-/// `Data` fields you serialize into a request body must match the server's
-/// expected shape exactly (see `HyperChat-RealBackend/README.md` for the
-/// full route table). This type owns exactly that: turning `APIClientProtocol`
-/// calls into HTTP requests against the Node relay in `HyperChatServer/`.
+/// `APIClientProtocol` over HTTPS against the Node relay.
 final class RealAPIClient: APIClientProtocol {
     private let baseURL: URL
     private let session: URLSession
@@ -27,8 +24,45 @@ final class RealAPIClient: APIClientProtocol {
         try await post("/auth/register", body: RegisterRequest(username: username, bundle: bundle), auth: false)
     }
 
+    /// The server no longer accepts username-only login.
     func login(username: String) async throws -> AuthToken {
-        try await post("/auth/login", body: ["username": username], auth: false)
+        throw NetworkError.server(status: 400, code: "badRequest", message: "Sign-in requires the device's keys.")
+    }
+
+    func login(username: String, prove: ChallengeSigner) async throws -> AuthToken {
+        let challenge: LoginChallenge = try await post(
+            "/auth/login/challenge", body: ["username": username], auth: false
+        )
+        let signature = try await prove(challenge)
+        return try await post(
+            "/auth/login",
+            body: SignedChallenge(username: username, nonce: challenge.nonce, signature: signature.base64EncodedString()),
+            auth: false
+        )
+    }
+
+    // MARK: Account
+
+    func deleteAccountOnServer(prove: ChallengeSigner) async throws {
+        let challenge: LoginChallenge = try await post("/account/delete/challenge", body: [String: String]())
+        let signature = try await prove(challenge)
+        try await postNoContent(
+            "/account/delete",
+            body: ["nonce": challenge.nonce, "signature": signature.base64EncodedString()]
+        )
+    }
+
+    func registerPushToken(_ token: String, environment: String) async throws {
+        try await postNoContent("/devices/push-token", body: ["token": token, "environment": environment])
+    }
+
+    func removePushToken(_ token: String, bearer: String) async throws {
+        var request = try makeRequest(path: "/devices/push-token/remove", method: "POST", auth: false)
+        request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try HyperChatJSON.encoder.encode(["token": token])
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data, expectedStatus: 204, allowRange: true)
     }
 
     // MARK: Prekeys
@@ -68,10 +102,7 @@ final class RealAPIClient: APIClientProtocol {
     }
 
     func fetchPendingEnvelopes(userId: String, since cursor: Int) async throws -> PendingEnvelopesPage {
-        // `userId` is accepted for source compatibility with `APIClientProtocol`
-        // but the server derives the actual recipient from the bearer token —
-        // it will 403 rather than trust a client-supplied id here, so passing
-        // anything other than the signed-in account's own id is pointless.
+        // The server derives the recipient from the bearer token.
         try await get("/messages/pending?since=\(cursor)")
     }
 
@@ -145,8 +176,6 @@ final class RealAPIClient: APIClientProtocol {
         }
     }
 
-    /// For endpoints that respond `204 No Content` (or `202` for a fire-and-forget
-    /// accept) with no body to decode.
     private func postNoContent<Body: Encodable>(
         _ path: String,
         body: Body,
@@ -159,9 +188,6 @@ final class RealAPIClient: APIClientProtocol {
         try validate(response, data: data, expectedStatus: expectedStatus, allowRange: true)
     }
 
-    /// Maps a non-2xx response to `APIError` where the server's `error` code
-    /// matches one of the mock's existing cases, so callers written against
-    /// `MockAPIClient`'s errors don't have to change at all.
     private func validate(
         _ response: URLResponse,
         data: Data,
@@ -202,13 +228,12 @@ private struct ReplenishRequest: Encodable {
     let keys: [OneTimePreKeyPublic]
 }
 
-/// Errors specific to talking to a real network, distinct from `APIError`
-/// (which describes what the *mock* could fail with). Kept separate rather
-/// than folded into `APIError` so call sites that only ever ran against the
-/// mock don't suddenly need to handle "the TLS handshake failed" — those
-/// call sites already treat any thrown error generically via
-/// `LocalizedError.errorDescription`, so this only needs a description, not
-/// special-casing everywhere.
+private struct SignedChallenge: Encodable {
+    let username: String
+    let nonce: String
+    let signature: String
+}
+
 enum NetworkError: LocalizedError {
     case invalidURL(String)
     case missingSessionToken

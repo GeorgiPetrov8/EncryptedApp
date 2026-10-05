@@ -11,5 +11,9 @@
   "engines": {
     "node": ">=22.5.0"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "dependencies": {
+    "dotenv": "^18.0.5",
+    "protobufjs": "^8.8.0"
+  }
 }

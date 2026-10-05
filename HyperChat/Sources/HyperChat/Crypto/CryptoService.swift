@@ -1,6 +1,31 @@
 import Foundation
 import CryptoKit
 
+/// Key material in portable form, for the encrypted backup (account recovery).
+///
+/// Only ever exists in memory and inside a password-encrypted backup file —
+/// never written anywhere in this form.
+struct ExportedKeyMaterial: Codable {
+    struct SignedPreKeyEntry: Codable {
+        let id: UInt32
+        let privateKey: Data
+        let signature: Data
+        let createdAt: Date
+    }
+
+    struct OneTimePreKeyEntry: Codable {
+        let id: UInt32
+        let privateKey: Data
+    }
+
+    /// 64 bytes: X25519 agreement key + Ed25519 signing key.
+    let identity: Data
+    let signedPreKeys: [SignedPreKeyEntry]
+    let currentSignedPreKeyId: UInt32
+    let oneTimePreKeys: [OneTimePreKeyEntry]
+    let nextOneTimePreKeyId: UInt32
+}
+
 /// Central point of contact for all cryptographic operations. Owns:
 ///  - the device's identity key + signed prekeys + one-time prekeys
 ///  - the device-local storage key (encrypts history / session state at rest)
@@ -8,9 +33,6 @@ import CryptoKit
 ///
 /// Bound to exactly one account at a time via `activate(userId:)`; every
 /// Keychain item is namespaced by that userId (Bug #10).
-///
-/// Pack 8 change: `clearSession(for:)` added under "Session management" — the
-/// only difference from the previous version of this file.
 final class CryptoService {
     private let keychain = KeychainStore()
     private(set) var signedPreKey: SignedPreKey?
@@ -18,9 +40,6 @@ final class CryptoService {
     private(set) var activeUserId: String?
 
     private var activeSessions: [String: DoubleRatchetSession] = [:]
-
-    /// Cached once unlocked: the item is `.userPresence`-gated, so reading it
-    /// per message would prompt per message.
     private var cachedStorageKey: SymmetricKey?
 
     static let oneTimePreKeyBatchSize = 20
@@ -48,7 +67,6 @@ final class CryptoService {
         activeUserId = userId
     }
 
-    /// Drops all in-memory secrets. Never deletes from the Keychain.
     func deactivate() {
         activeUserId = nil
         identity = nil
@@ -89,13 +107,7 @@ final class CryptoService {
         try keychain.save(key: try account(Keys.identity), data: identity.rawRepresentation())
         self.identity = identity
 
-        let storageKey = AESGCM.randomKey()
-        try keychain.save(
-            key: try account(Keys.storageKey),
-            data: storageKey.withUnsafeBytes { Data($0) },
-            requireUserPresence: true
-        )
-        cachedStorageKey = storageKey
+        try createStorageKey()
 
         try saveSignedPreKeyLiveIds([])
         let spk = try rotateSignedPreKey(force: true)
@@ -127,6 +139,107 @@ final class CryptoService {
     func deleteAccount(userId: String) {
         keychain.deleteAll(forUserId: userId)
         if activeUserId == userId { deactivate() }
+    }
+
+    // MARK: Backup export / import (account recovery)
+
+    /// Everything needed to be this account on another device.
+    ///
+    /// Ratchet sessions are deliberately NOT included: a session restored from
+    /// an older backup is behind the peer, and reusing its message counters
+    /// would produce messages the peer can't decrypt. A restored device starts
+    /// fresh sessions instead (see `MessagingService.reestablishSessions`).
+    func exportKeyMaterial() throws -> ExportedKeyMaterial {
+        guard let identity else { throw CryptoError.noActiveAccount }
+
+        let signedPreKeys = loadSignedPreKeyLiveIds()
+            .compactMap { try? signedPreKey(withId: $0) }
+            .map {
+                ExportedKeyMaterial.SignedPreKeyEntry(
+                    id: $0.id,
+                    privateKey: $0.privateKey.rawRepresentation,
+                    signature: $0.signature,
+                    createdAt: $0.createdAt
+                )
+            }
+
+        var oneTimePreKeys: [ExportedKeyMaterial.OneTimePreKeyEntry] = []
+        for id in loadLiveOneTimePreKeyIds() {
+            if let data = keychain.loadIfPresent(key: try account(Keys.oneTimePreKeysPrefix + String(id))) {
+                oneTimePreKeys.append(.init(id: id, privateKey: data))
+            }
+        }
+
+        return ExportedKeyMaterial(
+            identity: identity.rawRepresentation(),
+            signedPreKeys: signedPreKeys,
+            currentSignedPreKeyId: try loadCurrentSignedPreKeyId(),
+            oneTimePreKeys: oneTimePreKeys,
+            nextOneTimePreKeyId: loadNextOneTimePreKeyId()
+        )
+    }
+
+    /// Writes imported key material into this device's Keychain and creates a
+    /// fresh storage key. All-or-nothing: on any failure the partial import is
+    /// removed.
+    func importKeyMaterial(_ material: ExportedKeyMaterial, userId: String) throws {
+        guard !hasIdentity(forUserId: userId) else { throw CryptoError.identityAlreadyExists }
+
+        do {
+            activate(userId: userId)
+            let identity = try IdentityKeyPair.from(rawRepresentation: material.identity)
+
+            var liveSignedIds: [UInt32] = []
+            for entry in material.signedPreKeys {
+                let privateKey = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: entry.privateKey)
+                // A signed prekey that wasn't signed by this identity means the
+                // file was tampered with or mixed up between accounts.
+                guard identity.signingPublicKey.isValidSignature(
+                    entry.signature, for: privateKey.publicKey.rawRepresentation
+                ) else {
+                    throw CryptoError.invalidSignature
+                }
+                try keychain.save(key: try account(Keys.signedPreKeyPrefix + String(entry.id)), data: entry.privateKey)
+                try keychain.save(key: try account(Keys.signedPreKeySignaturePrefix + String(entry.id)), data: entry.signature)
+                try keychain.save(
+                    key: try account(Keys.signedPreKeyCreatedAtPrefix + String(entry.id)),
+                    data: Self.encode(entry.createdAt)
+                )
+                liveSignedIds.append(entry.id)
+            }
+            guard liveSignedIds.contains(material.currentSignedPreKeyId) else { throw CryptoError.unknownPreKeyId }
+            try saveSignedPreKeyLiveIds(liveSignedIds)
+            try saveCurrentSignedPreKeyId(material.currentSignedPreKeyId)
+
+            for entry in material.oneTimePreKeys {
+                _ = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: entry.privateKey)
+                try keychain.save(key: try account(Keys.oneTimePreKeysPrefix + String(entry.id)), data: entry.privateKey)
+            }
+            try saveLiveOneTimePreKeyIds(material.oneTimePreKeys.map(\.id))
+            try saveNextOneTimePreKeyId(material.nextOneTimePreKeyId)
+
+            // New device, new storage key — the old one never leaves its device.
+            try createStorageKey()
+
+            // Identity last: `hasIdentity` keys off it, so a crash mid-import
+            // leaves nothing that looks like a usable account.
+            try keychain.save(key: try account(Keys.identity), data: identity.rawRepresentation())
+            self.identity = identity
+            self.signedPreKey = try loadCurrentSignedPreKey()
+        } catch {
+            deleteAccount(userId: userId)
+            throw error
+        }
+    }
+
+    private func createStorageKey() throws {
+        let storageKey = AESGCM.randomKey()
+        try keychain.save(
+            key: try account(Keys.storageKey),
+            data: storageKey.withUnsafeBytes { Data($0) },
+            requireUserPresence: true
+        )
+        cachedStorageKey = storageKey
     }
 
     // MARK: Signed prekey rotation (Bug #7)
@@ -167,7 +280,6 @@ final class CryptoService {
         return spk
     }
 
-    /// Looks up a signed prekey by the id the initiator actually used.
     func signedPreKey(withId id: UInt32) throws -> SignedPreKey {
         guard let privateData = keychain.loadIfPresent(key: try account(Keys.signedPreKeyPrefix + String(id))),
               let signature = keychain.loadIfPresent(key: try account(Keys.signedPreKeySignaturePrefix + String(id))),
@@ -249,7 +361,6 @@ final class CryptoService {
             let privateKey = Curve25519.KeyAgreement.PrivateKey()
             let id = nextId
             nextId &+= 1
-
             try keychain.save(
                 key: try account(Keys.oneTimePreKeysPrefix + String(id)),
                 data: privateKey.rawRepresentation
@@ -346,12 +457,6 @@ final class CryptoService {
         activeSessions[peerUserId] = session
     }
 
-    /// FIX (Pack 8, Critical #1): drops an in-memory session.
-    ///
-    /// Used to roll back a session whose handshake never reached the peer, so
-    /// the next send performs a fresh X3DH instead of emitting `.ratchet`
-    /// envelopes the peer can never decrypt. Only `setSession` existed before,
-    /// so there was no way to undo a session once created.
     func clearSession(for peerUserId: String) {
         activeSessions[peerUserId] = nil
     }
@@ -366,5 +471,37 @@ final class CryptoService {
         guard let session = activeSessions[peerUserId] else { return nil }
         let stateData = try JSONEncoder().encode(session.exportState())
         return try encryptForStorage(stateData)
+    }
+}
+
+extension CryptoService {
+    /// Signs `message` with the active account's Ed25519 identity key.
+    ///
+    /// Used for the server's login and account-deletion challenges. The
+    /// signing key is taken from the stored identity and checked against the
+    /// public signing key, so a wrong half can never be used by mistake.
+    func signWithIdentity(_ message: Data) throws -> Data {
+        guard let identity else { throw CryptoError.noActiveAccount }
+        let raw = try identity.rawRepresentation()
+        let expected = identity.signingPublicKey.rawRepresentation
+
+        guard raw.count >= 64 else { throw CryptoError.invalidKeyData }
+        let candidates = [(raw.count - 32)..<raw.count, 0..<32]
+        for range in candidates {
+            if let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: raw.subdata(in: range)),
+               key.publicKey.rawRepresentation == expected {
+                return try key.signature(for: message)
+            }
+        }
+        throw CryptoError.invalidKeyData
+    }
+
+    /// Signs a server challenge after checking it's for `userId`.
+    func signChallenge(_ challenge: LoginChallenge, expectedUserId: String? = nil) throws -> Data {
+        if let expectedUserId, challenge.userId != expectedUserId {
+            throw AuthError.userIdMismatch
+        }
+        guard let nonce = Data(base64Encoded: challenge.nonce) else { throw CryptoError.invalidKeyData }
+        return try signWithIdentity(nonce)
     }
 }

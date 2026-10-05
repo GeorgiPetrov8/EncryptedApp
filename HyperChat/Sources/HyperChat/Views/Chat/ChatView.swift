@@ -36,66 +36,63 @@ struct ChatView: View {
         )
     }
 
-    // MARK: Body (split into sub-views to keep the type checker fast)
+    // MARK: Body
 
     var body: some View {
-        VStack(spacing: 0) {
-            identityBanner
-            invitationBanner
-            messageList
-            noticeBars
-            inputBar
-        }
-        .background { chatBackground }
-        .environment(\.chatAppearance, appearance)
-        .navigationTitle(viewModel.peerUsername)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
-        .sheet(isPresented: $showVerifyIdentity, onDismiss: { viewModel.reloadPeer() }) {
-            verifyIdentitySheet
-        }
-        .sheet(isPresented: $showNotePad) {
-            NotePadView(container: container, conversation: viewModel.conversation)
-        }
-        .sheet(isPresented: $showAppearanceSettings) {
-            AppearanceSettingsView(conversationId: viewModel.conversation.id)
-                .environmentObject(container)
-        }
-        .sheet(isPresented: $showCameraPicker) {
-            CameraPicker(
-                onCaptured: { capture in
-                    showCameraPicker = false
-                    Task { await viewModel.sendCapturedMedia(capture) }
-                },
-                onCancelled: { showCameraPicker = false }
-            )
-        }
-        .sheet(isPresented: $showDocumentPicker) {
-            DocumentPicker(
-                onPicked: { url in
-                    showDocumentPicker = false
-                    Task { await viewModel.sendDocument(from: url) }
-                },
-                onCancelled: { showDocumentPicker = false }
-            )
-        }
-        .sheet(isPresented: $showGIFPicker) {
-            GIFPickerView { data in
-                Task { await viewModel.sendGIF(data) }
+        messageList
+            // Floating bars: messages scroll underneath both.
+            .safeAreaInset(edge: .top, spacing: 0) { topBar }
+            .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+            .background { chatBackground }
+            .environment(\.chatAppearance, appearance)
+            .environment(\.chromeStyle, chrome)
+            // The header notch replaces the navigation bar. Swipe-back keeps
+            // working thanks to `NavigationSwipeBack.swift`.
+            .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showVerifyIdentity, onDismiss: { viewModel.reloadPeer() }) {
+                verifyIdentitySheet
             }
-            .environmentObject(container)
-        }
-        .onAppear {
-            viewModel.reloadConversation()
-            viewModel.reloadPeer()
-            viewModel.setVisible(true)
-            Task { await container.profileService.ensureShared(with: viewModel.conversation) }
-        }
-        .onDisappear { viewModel.setVisible(false) }
-        // Declining deletes the conversation — go back to the list.
-        .onChange(of: viewModel.wasRemoved) { _, removed in
-            if removed { dismiss() }
-        }
+            .sheet(isPresented: $showNotePad) {
+                NotePadView(container: container, conversation: viewModel.conversation)
+            }
+            .sheet(isPresented: $showAppearanceSettings) {
+                AppearanceSettingsView(scope: .conversation(viewModel.conversation.id))
+                    .environmentObject(container)
+            }
+            .sheet(isPresented: $showCameraPicker) {
+                CameraPicker(
+                    onCaptured: { capture in
+                        showCameraPicker = false
+                        Task { await viewModel.sendCapturedMedia(capture) }
+                    },
+                    onCancelled: { showCameraPicker = false }
+                )
+            }
+            .sheet(isPresented: $showDocumentPicker) {
+                DocumentPicker(
+                    onPicked: { url in
+                        showDocumentPicker = false
+                        Task { await viewModel.sendDocument(from: url) }
+                    },
+                    onCancelled: { showDocumentPicker = false }
+                )
+            }
+            .sheet(isPresented: $showGIFPicker) {
+                GIFPickerView { data in
+                    Task { await viewModel.sendGIF(data) }
+                }
+                .environmentObject(container)
+            }
+            .onAppear {
+                viewModel.reloadConversation()
+                viewModel.reloadPeer()
+                viewModel.setVisible(true)
+                Task { await container.profileService.ensureShared(with: viewModel.conversation) }
+            }
+            .onDisappear { viewModel.setVisible(false) }
+            .onChange(of: viewModel.wasRemoved) { _, removed in
+                if removed { dismiss() }
+            }
     }
 
     // MARK: Appearance
@@ -104,11 +101,43 @@ struct ChatView: View {
         appearanceStore.appearance(for: viewModel.conversation.id)
     }
 
+    private var chrome: ChromeStyle {
+        appearanceStore.chrome(for: appearance)
+    }
+
     private var chatBackground: some View {
         ChatBackgroundView(appearance: appearance) { appearanceStore.imageURL(fileName: $0) }
     }
 
-    // MARK: Banners
+    // MARK: Top bar
+
+    private var topBar: some View {
+        VStack(spacing: 6) {
+            ChatHeaderNotch(
+                peerId: viewModel.peerId,
+                name: viewModel.peerUsername,
+                avatar: peerAvatarData,
+                isOnline: isPeerOnline,
+                isVerified: viewModel.peerIsVerified,
+                identityChanged: viewModel.peerIdentityChanged,
+                canCall: viewModel.canCall,
+                notePadEnabled: viewModel.relationshipState == .accepted,
+                notePadBadge: notePadBadgeCount,
+                onBack: { dismiss() },
+                onCall: startCall,
+                onNotePad: { showNotePad = true },
+                onVerify: { showVerifyIdentity = true },
+                onAppearance: { showAppearanceSettings = true }
+            )
+            .notchStyle(chrome)
+
+            identityBanner
+            invitationBanner
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 2)
+        .padding(.bottom, 4)
+    }
 
     @ViewBuilder
     private var identityBanner: some View {
@@ -116,16 +145,15 @@ struct ChatView: View {
             IdentityChangedBanner(username: viewModel.peerUsername) {
                 showVerifyIdentity = true
             }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
     }
 
-    /// FIX (invitations): explains the chat's state and offers the next step.
     @ViewBuilder
     private var invitationBanner: some View {
         switch viewModel.relationshipState {
         case .accepted:
             EmptyView()
-
         case .invitedByThem:
             InvitationBanner(
                 icon: "person.crop.circle.badge.questionmark",
@@ -135,10 +163,13 @@ struct ChatView: View {
             ) {
                 Button("Accept") { Task { await viewModel.acceptInvitation() } }
                     .buttonStyle(.borderedProminent)
+                    // Explicit tint: inside a notch the tint is the text colour,
+                    // and a prominent button filled with it would hide its label.
+                    .tint(.accentColor)
                 Button("Decline", role: .destructive) { Task { await viewModel.declineInvitation() } }
                     .buttonStyle(.bordered)
             }
-
+            .notchStyle(chrome, cornerRadius: 16)
         case .invitedByMe:
             InvitationBanner(
                 icon: "hourglass",
@@ -149,7 +180,7 @@ struct ChatView: View {
                 Button("Resend invitation") { Task { await viewModel.resendInvitation() } }
                     .buttonStyle(.bordered)
             }
-
+            .notchStyle(chrome, cornerRadius: 16)
         case .declined:
             InvitationBanner(
                 icon: "xmark.circle",
@@ -160,6 +191,7 @@ struct ChatView: View {
                 Button("Invite again") { Task { await viewModel.resendInvitation() } }
                     .buttonStyle(.bordered)
             }
+            .notchStyle(chrome, cornerRadius: 16)
         }
     }
 
@@ -173,17 +205,76 @@ struct ChatView: View {
                         MessageBubbleView(
                             message: message,
                             peerIsVerified: viewModel.peerIsVerified,
-                            mediaLoader: { await viewModel.loadMediaData(forMessageId: $0) }
+                            mediaLoader: { await viewModel.loadMediaData(forMessageId: $0) },
+                            onReply: { viewModel.startReply(to: message) },
+                            onEdit: { viewModel.startEdit(message) },
+                            onDelete: { viewModel.deleteForMe(message) },
+                            onQuoteTap: { id in
+                                withAnimation { proxy.scrollTo(id, anchor: .center) }
+                            }
                         )
                         .id(message.id)
                     }
                 }
-                .padding()
+                .padding(.horizontal)
+                .padding(.vertical, 8)
             }
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: viewModel.messages.count) { _, _ in
                 guard let last = viewModel.messages.last else { return }
                 withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
             }
+        }
+    }
+
+    // MARK: Bottom bar
+
+    private var bottomBar: some View {
+        VStack(spacing: 6) {
+            noticeBars
+
+            VStack(spacing: 0) {
+                composerContext
+                MessageInputBar(
+                    text: $viewModel.draftText,
+                    selectedPhotoItem: $viewModel.selectedPhotoItem,
+                    isSending: viewModel.isSending,
+                    isSendingMedia: viewModel.isSendingMedia,
+                    disabledReason: viewModel.composeDisabledReason,
+                    isEditing: viewModel.editing != nil,
+                    focusRequest: viewModel.focusRequest,
+                    onSend: { Task { await viewModel.send() } },
+                    onCamera: { showCameraPicker = true },
+                    onDocument: { showDocumentPicker = true },
+                    onGIF: { showGIFPicker = true },
+                    onVoiceFinished: { voiceMessage in
+                        Task { await viewModel.sendVoiceMessage(voiceMessage) }
+                    }
+                )
+            }
+            .notchStyle(chrome)
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
+    }
+
+    /// "Replying to …" / "Edit message" strip above the text field.
+    @ViewBuilder
+    private var composerContext: some View {
+        if let reply = viewModel.replyingTo {
+            ComposerContextBar(
+                icon: "arrowshape.turn.up.left.fill",
+                title: reply.isMine ? "Replying to yourself" : "Replying to \(viewModel.peerUsername)",
+                detail: reply.text,
+                onCancel: viewModel.cancelComposerContext
+            )
+        } else if let editing = viewModel.editing {
+            ComposerContextBar(
+                icon: "pencil",
+                title: "Edit message",
+                detail: editing.copyText ?? "",
+                onCancel: viewModel.cancelComposerContext
+            )
         }
     }
 
@@ -196,8 +287,8 @@ struct ChatView: View {
                 icon: "exclamationmark.triangle.fill",
                 onDismiss: { viewModel.dismissReceiveError() }
             )
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
-
         if let error = viewModel.errorMessage {
             NoticeBar(
                 text: error,
@@ -206,6 +297,7 @@ struct ChatView: View {
                 onDismiss: { viewModel.dismissSendError() },
                 action: retryAction
             )
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
     }
 
@@ -216,119 +308,16 @@ struct ChatView: View {
         }
     }
 
-    private var inputBar: some View {
-        MessageInputBar(
-            text: $viewModel.draftText,
-            selectedPhotoItem: $viewModel.selectedPhotoItem,
-            isSending: viewModel.isSending,
-            isSendingMedia: viewModel.isSendingMedia,
-            disabledReason: viewModel.composeDisabledReason,
-            onSend: { Task { await viewModel.send() } },
-            onCamera: { showCameraPicker = true },
-            onDocument: { showDocumentPicker = true },
-            onGIF: { showGIFPicker = true },
-            onVoiceFinished: { voiceMessage in
-                Task { await viewModel.sendVoiceMessage(voiceMessage) }
-            }
-        )
-    }
-
-    // MARK: Toolbar
-
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            peerHeader
-        }
-        ToolbarItemGroup(placement: .navigationBarTrailing) {
-            callMenu
-            notePadButton
-            moreMenu
-        }
-    }
-
-    /// FIX (calls): the entry point. Voice or video, only once the
-    /// invitation is accepted.
-    private var callMenu: some View {
-        Menu {
-            Button {
-                startCall(video: false)
-            } label: {
-                Label("Voice call", systemImage: "phone")
-            }
-            Button {
-                startCall(video: true)
-            } label: {
-                Label("Video call", systemImage: "video")
-            }
-        } label: {
-            Image(systemName: "phone")
-        }
-        .disabled(!viewModel.canCall)
-        .accessibilityLabel("Call")
-    }
+    // MARK: Actions & derived values
 
     private func startCall(video: Bool) {
         Task {
             await container.callService.startCall(in: viewModel.conversation, video: video)
-            // Errors before the call screen appears (no permission, WebRTC
-            // missing, not accepted) are shown here in the chat.
             if case .idle = container.callService.phase,
                let error = container.callService.consumeError() {
                 viewModel.errorMessage = error
             }
         }
-    }
-
-    /// Verification and background moved into one menu so the bar isn't
-    /// crowded. The icon still turns red when security keys changed.
-    private var moreMenu: some View {
-        Menu {
-            Button {
-                showVerifyIdentity = true
-            } label: {
-                Label("Verify security", systemImage: verificationIcon)
-            }
-            Button {
-                showAppearanceSettings = true
-            } label: {
-                Label("Chat background", systemImage: "paintbrush")
-            }
-        } label: {
-            Image(systemName: viewModel.peerIdentityChanged ? "exclamationmark.shield.fill" : "ellipsis.circle")
-                .foregroundStyle(viewModel.peerIdentityChanged ? Color.red : Color.accentColor)
-        }
-        .accessibilityLabel("More")
-    }
-
-    private var peerHeader: some View {
-        HStack(spacing: 8) {
-            AvatarView(
-                userId: viewModel.peerId ?? viewModel.peerUsername,
-                displayName: viewModel.peerUsername,
-                imageData: peerAvatarData,
-                size: 32,
-                isOnline: isPeerOnline
-            )
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 4) {
-                    Text(viewModel.peerUsername)
-                        .font(.headline)
-                        .lineLimit(1)
-                    if viewModel.peerIsVerified {
-                        Image(systemName: "checkmark.shield.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.green)
-                    }
-                }
-                if isPeerOnline {
-                    Text("online")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                }
-            }
-        }
-        .accessibilityElement(children: .combine)
     }
 
     private var isPeerOnline: Bool {
@@ -342,29 +331,11 @@ struct ChatView: View {
         return profileService.avatarData(for: peerId)
     }
 
-    private var notePadButton: some View {
-        Button {
-            showNotePad = true
-        } label: {
-            Image(systemName: "checklist")
-        }
-        .disabled(viewModel.relationshipState != .accepted)
-        .accessibilityLabel("Shared pad")
-        .overlay(alignment: .topTrailing) {
-            notePadBadge
-        }
-    }
-
-    @ViewBuilder
-    private var notePadBadge: some View {
-        if notePadBadgeCount > 0 {
-            Text("\(notePadBadgeCount)")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white)
-                .padding(4)
-                .background(Circle().fill(Color.red))
-                .offset(x: 8, y: -8)
-        }
+    private var notePadBadgeCount: Int {
+        container.notePadService
+            .items(for: viewModel.conversation.id)
+            .filter { !$0.isDeleted && !$0.isDone }
+            .count
     }
 
     @ViewBuilder
@@ -373,21 +344,144 @@ struct ChatView: View {
             VerifyIdentityView(peerId: peerId, peerUsername: viewModel.peerUsername)
         }
     }
+}
 
-    private var notePadBadgeCount: Int {
-        container.notePadService
-            .items(for: viewModel.conversation.id)
-            .filter { !$0.isDeleted && !$0.isDone }
-            .count
-    }
+// MARK: - Header notch
 
-    private var verificationIcon: String {
-        if viewModel.peerIdentityChanged { return "exclamationmark.shield.fill" }
-        return viewModel.peerIsVerified ? "checkmark.shield.fill" : "shield"
+private struct ChatHeaderNotch: View {
+    let peerId: String?
+    let name: String
+    let avatar: Data?
+    let isOnline: Bool
+    let isVerified: Bool
+    let identityChanged: Bool
+    let canCall: Bool
+    let notePadEnabled: Bool
+    let notePadBadge: Int
+    let onBack: () -> Void
+    let onCall: (Bool) -> Void
+    let onNotePad: () -> Void
+    let onVerify: () -> Void
+    let onAppearance: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onBack) {
+                Image(systemName: "chevron.left")
+                    .font(.title3.weight(.semibold))
+                    .frame(width: 28, height: 36)
+            }
+            .accessibilityLabel("Back")
+
+            AvatarView(
+                userId: peerId ?? name,
+                displayName: name,
+                imageData: avatar,
+                size: 36,
+                isOnline: isOnline
+            )
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(name)
+                        .font(.headline)
+                        .lineLimit(1)
+                    if isVerified {
+                        Image(systemName: "checkmark.shield.fill")
+                            .font(.caption2)
+                    }
+                }
+                if isOnline {
+                    // Same colour as the name, smaller and lighter — the
+                    // contrast rule doesn't allow a faded secondary colour.
+                    Text("online")
+                        .font(.caption2.weight(.medium))
+                }
+            }
+            .accessibilityElement(children: .combine)
+
+            Spacer(minLength: 4)
+
+            Menu {
+                Button { onCall(false) } label: { Label("Voice call", systemImage: "phone") }
+                Button { onCall(true) } label: { Label("Video call", systemImage: "video") }
+            } label: {
+                Image(systemName: "phone")
+                    .font(.title3)
+                    .frame(width: 32, height: 36)
+            }
+            .disabled(!canCall)
+            .opacity(canCall ? 1 : 0.4)
+            .accessibilityLabel("Call")
+
+            Button(action: onNotePad) {
+                Image(systemName: "checklist")
+                    .font(.title3)
+                    .frame(width: 32, height: 36)
+                    .overlay(alignment: .topTrailing) {
+                        if notePadBadge > 0 {
+                            Text("\(notePadBadge)")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(4)
+                                .background(Circle().fill(Color.red))
+                                .offset(x: 6, y: -4)
+                        }
+                    }
+            }
+            .disabled(!notePadEnabled)
+            .opacity(notePadEnabled ? 1 : 0.4)
+            .accessibilityLabel("Shared pad")
+
+            Menu {
+                Button(action: onVerify) {
+                    Label("Verify security", systemImage: identityChanged ? "exclamationmark.shield.fill" : "shield")
+                }
+                Button(action: onAppearance) {
+                    Label("Chat background", systemImage: "paintbrush")
+                }
+            } label: {
+                Image(systemName: identityChanged ? "exclamationmark.shield.fill" : "ellipsis.circle")
+                    .font(.title3)
+                    .foregroundStyle(identityChanged ? Color.red : Color.primary)
+                    .frame(width: 32, height: 36)
+            }
+            .accessibilityLabel("More")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
     }
 }
 
 // MARK: - Supporting views
+
+private struct ComposerContextBar: View {
+    let icon: String
+    let title: String
+    let detail: String
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.footnote)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.caption.bold())
+                Text(detail)
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button(action: onCancel) {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .accessibilityLabel("Cancel")
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+    }
+}
 
 struct NoticeBar: View {
     struct Action {
@@ -408,7 +502,11 @@ struct NoticeBar: View {
             Text(text)
                 .font(.footnote)
             Spacer()
-            actionButton
+            if let action {
+                Button(action.title, action: action.handler)
+                    .font(.footnote.bold())
+                    .buttonStyle(.bordered)
+            }
             Button(action: onDismiss) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
@@ -418,15 +516,6 @@ struct NoticeBar: View {
         .padding(10)
         .background(.bar)
         .background(tint.opacity(0.12))
-    }
-
-    @ViewBuilder
-    private var actionButton: some View {
-        if let action {
-            Button(action.title, action: action.handler)
-                .font(.footnote.bold())
-                .buttonStyle(.bordered)
-        }
     }
 }
 
@@ -444,7 +533,6 @@ private struct InvitationBanner<Actions: View>: View {
             if let detail, !detail.isEmpty {
                 Text(detail)
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
                 actions()
@@ -455,7 +543,6 @@ private struct InvitationBanner<Actions: View>: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.bar)
     }
 }
 
@@ -466,20 +553,19 @@ private struct IdentityChangedBanner: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.white)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Security keys for \(username) changed")
                     .font(.footnote.bold())
                 Text("Messaging is paused until you review this.")
                     .font(.caption)
             }
-            .foregroundStyle(.white)
             Spacer()
             Button("Review", action: onReview)
                 .font(.footnote.bold())
                 .buttonStyle(.bordered)
                 .tint(.white)
         }
+        .foregroundStyle(.white)
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.red)
@@ -491,11 +577,13 @@ private struct MessageInputBar: View {
     @Binding var selectedPhotoItem: PhotosPickerItem?
 
     @StateObject private var voiceRecorder = VoiceRecorder()
+    @FocusState private var isFocused: Bool
 
     let isSending: Bool
     let isSendingMedia: Bool
-    /// Non-nil when typing isn't allowed; also used as the placeholder.
     let disabledReason: String?
+    let isEditing: Bool
+    let focusRequest: Int
     let onSend: () -> Void
     let onCamera: () -> Void
     let onDocument: () -> Void
@@ -503,93 +591,71 @@ private struct MessageInputBar: View {
     let onVoiceFinished: (RecordedVoiceMessage) -> Void
 
     private var isDisabled: Bool { disabledReason != nil }
+    private var hasText: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
         VStack(spacing: 0) {
-            sendingIndicator
+            if isSendingMedia {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("Sending attachment…").font(.caption2)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+            }
             controls
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
         }
-        .background(.bar)
+        .onChange(of: focusRequest) { _, _ in isFocused = true }
     }
 
     @ViewBuilder
-    private var sendingIndicator: some View {
-        if isSendingMedia {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.mini)
-                Text("Sending attachment…")
-                    .font(.caption2)
-                Spacer()
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal)
-            .padding(.top, 6)
-        }
-    }
-
     private var controls: some View {
-        HStack(spacing: 8) {
-            attachmentMenu
-            if voiceRecorder.isRecording {
-                VoiceRecordingBar(recorder: voiceRecorder)
-                    .frame(maxWidth: .infinity)
-            } else {
-                textField
-                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    voiceButton
+        if voiceRecorder.isRecording && voiceRecorder.isLocked {
+            LockedRecordingControls(recorder: voiceRecorder, onSend: onVoiceFinished)
+        } else {
+            HStack(spacing: 8) {
+                if voiceRecorder.isRecording {
+                    VoiceRecordingBar(recorder: voiceRecorder)
+                        .frame(maxWidth: .infinity)
                 } else {
-                    sendButton
+                    AttachmentMenu(
+                        selectedPhotoItem: $selectedPhotoItem,
+                        isDisabled: isDisabled || isSendingMedia || isEditing,
+                        onCamera: onCamera,
+                        onDocument: onDocument,
+                        onGIF: onGIF
+                    )
+                    TextField(disabledReason ?? (isEditing ? "Edit message" : "Message"), text: $text, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(1...4)
+                        .focused($isFocused)
+                        .disabled(isDisabled)
+                }
+
+                // The mic stays in the hierarchy for the whole press — see
+                // `VoiceRecordButton` for why that matters.
+                if hasText || isEditing {
+                    Button(action: onSend) {
+                        if isSending {
+                            ProgressView()
+                        } else {
+                            Image(systemName: isEditing ? "checkmark.circle.fill" : "arrow.up.circle.fill")
+                                .font(.title)
+                        }
+                    }
+                    .disabled(isDisabled || !hasText || isSending)
+                    .accessibilityLabel(isEditing ? "Save edit" : "Send")
+                } else {
+                    VoiceRecordButton(
+                        recorder: voiceRecorder,
+                        isDisabled: isDisabled || isSending || isSendingMedia,
+                        onFinished: onVoiceFinished
+                    )
                 }
             }
         }
-        .padding()
-    }
-
-    private var attachmentMenu: some View {
-        AttachmentMenu(
-            selectedPhotoItem: $selectedPhotoItem,
-            isDisabled: isDisabled || isSendingMedia,
-            onCamera: onCamera,
-            onDocument: onDocument,
-            onGIF: onGIF
-        )
-    }
-
-    private var textField: some View {
-        TextField(disabledReason ?? "Message", text: $text, axis: .vertical)
-            .textFieldStyle(.roundedBorder)
-            .lineLimit(1...4)
-            .disabled(isDisabled)
-    }
-
-    private var sendButton: some View {
-        Button(action: onSend) {
-            sendButtonLabel
-        }
-        .disabled(isSendDisabled)
-    }
-
-    private var voiceButton: some View {
-        VoiceRecordButton(
-            recorder: voiceRecorder,
-            isDisabled: isDisabled || isSending || isSendingMedia,
-            onFinished: onVoiceFinished
-        )
-    }
-
-    @ViewBuilder
-    private var sendButtonLabel: some View {
-        if isSending {
-            ProgressView()
-        } else {
-            Image(systemName: "arrow.up.circle.fill")
-                .font(.title2)
-        }
-    }
-
-    private var isSendDisabled: Bool {
-        isDisabled
-            || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || isSending
     }
 }

@@ -1,33 +1,44 @@
 import SwiftUI
 import AVFoundation
 
-/// Hold-to-record control in the composer.
+/// The mic button.
 ///
-/// Press and hold to record, release to send, slide left to cancel — the
-/// gesture people already know. A tap-to-start/tap-to-stop toggle is easier to
-/// build but leaves a recording running when the user gets distracted, which
-/// is how you accidentally send ninety seconds of ambient noise.
+/// - Hold, then release → sends.
+/// - Quick tap → locks (records hands-free, shows Send / Delete / Pause).
+/// - While holding, slide up → locks; slide left → cancels.
+///
+/// FIX: the old composer *removed* this button from the view hierarchy as soon
+/// as recording started (it swapped the text field and mic for the recording
+/// bar). A gesture whose view disappears never gets `onEnded`, so releasing the
+/// finger did nothing and the recording could never be sent. The composer now
+/// keeps this button on screen for the whole press.
 struct VoiceRecordButton: View {
     @ObservedObject var recorder: VoiceRecorder
     let isDisabled: Bool
     let onFinished: (RecordedVoiceMessage) -> Void
 
-    @State private var dragOffset: CGFloat = 0
+    @State private var pressStartedAt: Date?
+    @State private var translation: CGSize = .zero
     @State private var permissionDenied = false
 
-    /// Past this leftward distance, releasing cancels instead of sending.
     private let cancelThreshold: CGFloat = -80
+    private let lockThreshold: CGFloat = -60
+    /// A press shorter than this counts as a tap.
+    private let tapDuration: TimeInterval = 0.35
 
     var body: some View {
         Image(systemName: recorder.isRecording ? "mic.fill" : "mic")
             .font(.title2)
             .foregroundStyle(iconColor)
-            .scaleEffect(recorder.isRecording ? 1.3 : 1.0)
+            .frame(width: 36, height: 36)
+            .contentShape(Rectangle())
+            .scaleEffect(recorder.isRecording ? 1.35 : 1.0)
+            .offset(x: min(0, translation.width), y: min(0, translation.height))
             .animation(.spring(duration: 0.2), value: recorder.isRecording)
-            .offset(x: min(0, dragOffset))
-            .gesture(recordGesture)
-            .disabled(isDisabled)
-            .accessibilityLabel("Hold to record a voice message")
+            .gesture(recordGesture, including: isDisabled ? .none : .all)
+            .opacity(isDisabled ? 0.4 : 1)
+            .accessibilityLabel("Record a voice message")
+            .accessibilityHint("Hold to record and release to send, or tap to record hands-free")
             .alert("Microphone access needed", isPresented: $permissionDenied) {
                 Button("Open Settings") {
                     if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -41,60 +52,80 @@ struct VoiceRecordButton: View {
     }
 
     private var iconColor: Color {
-        if isDisabled { return .secondary }
-        if dragOffset < cancelThreshold { return .red }
+        if translation.width < cancelThreshold { return .red }
         return recorder.isRecording ? .red : .accentColor
     }
 
     private var recordGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if !recorder.isRecording {
-                    Task { await beginRecording() }
+                if pressStartedAt == nil {
+                    pressStartedAt = Date()
+                    begin()
                 }
-                dragOffset = value.translation.width
+                translation = value.translation
+                if recorder.isRecording, !recorder.isLocked, value.translation.height < lockThreshold {
+                    recorder.lock()
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                }
             }
             .onEnded { _ in
-                let cancelled = dragOffset < cancelThreshold
-                dragOffset = 0
-                if cancelled {
+                let started = pressStartedAt
+                let finalTranslation = translation
+                pressStartedAt = nil
+                translation = .zero
+
+                guard recorder.isRecording, !recorder.isLocked else { return }
+
+                if finalTranslation.width < cancelThreshold {
                     recorder.cancel()
-                } else if let recorded = recorder.stop() {
+                    return
+                }
+                if let started, Date().timeIntervalSince(started) < tapDuration {
+                    // A tap: keep recording hands-free.
+                    recorder.lock()
+                    return
+                }
+                if let recorded = recorder.stop() {
                     onFinished(recorded)
                 }
-                // A too-short recording returns nil from `stop()` and is
-                // silently discarded — a mis-tap shouldn't send anything, and
-                // shouldn't produce an error either.
             }
     }
 
-    private func beginRecording() async {
+    /// Synchronous when permission is already granted, so a quick tap can't
+    /// end before recording has started.
+    private func begin() {
         switch recorder.permissionStatus {
         case .granted:
-            try? recorder.start()
+            do {
+                try recorder.start()
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } catch {
+                pressStartedAt = nil
+            }
         case .denied:
             permissionDenied = true
         default:
-            if await recorder.requestPermission() {
-                try? recorder.start()
-            } else {
-                permissionDenied = true
+            // First use: ask, and let the user press again once allowed.
+            Task {
+                if await recorder.requestPermission() == false {
+                    permissionDenied = true
+                }
             }
         }
     }
 }
 
-/// The recording indicator that replaces the text field while recording.
+/// Shown in place of the text field while recording.
 struct VoiceRecordingBar: View {
     @ObservedObject var recorder: VoiceRecorder
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Circle()
                 .fill(.red)
-                .frame(width: 10, height: 10)
-                .opacity(recorder.isRecording ? 1 : 0.3)
-                .animation(.easeInOut(duration: 0.6).repeatForever(), value: recorder.isRecording)
+                .frame(width: 9, height: 9)
+                .opacity(recorder.isPaused ? 0.3 : 1)
 
             Text(timeString(recorder.duration))
                 .font(.system(.body, design: .monospaced))
@@ -102,14 +133,19 @@ struct VoiceRecordingBar: View {
 
             LiveWaveform(level: recorder.level)
 
-            Spacer()
+            Spacer(minLength: 4)
 
-            Label("Slide to cancel", systemImage: "chevron.left")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            if !recorder.isLocked {
+                Text("← cancel · ↑ lock")
+                    .font(.caption2)
+                    .lineLimit(1)
+            } else if recorder.isPaused {
+                Text("Paused")
+                    .font(.caption2)
+            }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 
     private func timeString(_ interval: TimeInterval) -> String {
@@ -117,17 +153,55 @@ struct VoiceRecordingBar: View {
     }
 }
 
-/// Live level meter during recording.
+/// Hands-free recording controls: delete, pause/resume, send.
+struct LockedRecordingControls: View {
+    @ObservedObject var recorder: VoiceRecorder
+    let onSend: (RecordedVoiceMessage) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(role: .destructive) {
+                recorder.cancel()
+            } label: {
+                Image(systemName: "trash")
+                    .font(.title3)
+            }
+            .accessibilityLabel("Delete recording")
+
+            VoiceRecordingBar(recorder: recorder)
+                .frame(maxWidth: .infinity)
+
+            Button {
+                recorder.isPaused ? recorder.resume() : recorder.pause()
+            } label: {
+                Image(systemName: recorder.isPaused ? "mic.circle" : "pause.circle")
+                    .font(.title2)
+            }
+            .accessibilityLabel(recorder.isPaused ? "Resume recording" : "Pause recording")
+
+            Button {
+                if let recorded = recorder.stop() {
+                    onSend(recorded)
+                }
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.title)
+            }
+            .accessibilityLabel("Send voice message")
+        }
+    }
+}
+
 private struct LiveWaveform: View {
     let level: Float
-    @State private var history: [Float] = Array(repeating: 0, count: 24)
+    @State private var history: [Float] = Array(repeating: 0, count: 20)
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(history.indices, id: \.self) { index in
                 Capsule()
-                    .fill(Color.accentColor)
-                    .frame(width: 2, height: max(3, CGFloat(history[index]) * 22))
+                    .fill(.red.opacity(0.8))
+                    .frame(width: 2, height: max(3, CGFloat(history[index]) * 20))
             }
         }
         .onChange(of: level) { _, newValue in
@@ -163,7 +237,7 @@ struct VoiceMessageBubble: View {
                     .frame(height: 24)
                 Text(timeString(player.isPlaying ? player.currentTime : duration))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(tint)
                     .monospacedDigit()
             }
         }
@@ -185,7 +259,6 @@ struct VoiceMessageBubble: View {
     }
 }
 
-/// The transmitted waveform, with the played portion highlighted.
 private struct StaticWaveform: View {
     let samples: [Float]
     let progress: Double
@@ -217,12 +290,8 @@ final class VoiceMessagePlayer: NSObject, ObservableObject {
 
     func play(data: Data) {
         do {
-            // `.playback` so a voice message is audible with the ringer switch
-            // set to silent — otherwise the common case is tapping play and
-            // hearing nothing with no explanation.
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
             try AVAudioSession.sharedInstance().setActive(true)
-
             let player = try AVAudioPlayer(data: data)
             player.delegate = self
             player.play()

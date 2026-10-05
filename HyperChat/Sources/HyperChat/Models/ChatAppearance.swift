@@ -1,20 +1,12 @@
 import SwiftUI
 
-/// Per-device chat appearance: a custom background, either a solid colour or a
-/// photo, applied globally or per-conversation.
-///
-/// Deliberately device-local — never synced, never sent to the server. It is a
-/// cosmetic preference with no value to the peer, and syncing it would mean
-/// uploading a user's chosen photo, which is a privacy cost for no benefit.
+/// Per-device appearance: a background (solid colour or photo), applied to all
+/// chats, to one chat, or to the chats list. Never synced or uploaded.
 struct ChatAppearance: Codable, Equatable {
-
     enum Background: Codable, Equatable {
         case systemDefault
-        /// Stored as components rather than `Color`, which isn't `Codable`.
         case solid(red: Double, green: Double, blue: Double)
-        /// Filename inside the appearance image directory (see
-        /// `AppearanceStore`), not an absolute path — absolute paths break
-        /// when iOS relocates the app container between launches.
+        /// Filename inside the appearance image directory, never an absolute path.
         case image(fileName: String)
 
         var color: Color? {
@@ -24,26 +16,88 @@ struct ChatAppearance: Codable, Equatable {
     }
 
     var background: Background = .systemDefault
-
-    /// How strongly bubbles stand out from the background. Exposed because the
-    /// right amount is genuinely taste-dependent over a photo, and because a
-    /// user who picks a busy image needs a way to make text readable without
-    /// abandoning the image.
+    /// Photo backgrounds: how strongly the photo is dimmed (see `effectiveScrimOpacity`).
     var bubbleOpacity: Double = 1.0
 
     static let `default` = ChatAppearance()
 }
 
-/// Derives readable foreground colours for an arbitrary user-chosen background.
-///
-/// This exists because "let the user pick any colour" and "the app must remain
-/// readable" are in direct conflict unless something enforces contrast. Black
-/// text on a black background is the obvious failure, but the subtle ones —
-/// mid-grey, muddy teal — are the ones a user will actually stumble into.
-enum ContrastPolicy {
+/// Where an appearance applies.
+enum AppearanceScope: Equatable, Identifiable {
+    /// The default for every chat without its own background.
+    case allChats
+    /// The chats list (the app's main screen).
+    case chatList
+    /// One conversation.
+    case conversation(String)
 
-    /// WCAG 2.1 relative luminance. The odd-looking constants are the sRGB
-    /// gamma curve and the CIE luminance weights; they are not tunable.
+    var id: String {
+        switch self {
+        case .allChats: return "allChats"
+        case .chatList: return "chatList"
+        case .conversation(let id): return "conversation:\(id)"
+        }
+    }
+}
+
+/// A plain sRGB colour with the arithmetic the contrast rules need.
+struct RGB: Codable, Equatable {
+    var r: Double
+    var g: Double
+    var b: Double
+
+    static let white = RGB(r: 1, g: 1, b: 1)
+    static let black = RGB(r: 0, g: 0, b: 0)
+
+    var color: Color { Color(red: r, green: g, blue: b) }
+
+    func mixed(with other: RGB, _ amount: Double) -> RGB {
+        RGB(r: r + (other.r - r) * amount, g: g + (other.g - g) * amount, b: b + (other.b - b) * amount)
+    }
+
+    var prefersLightForeground: Bool {
+        ContrastPolicy.prefersLightForeground(red: r, green: g, blue: b)
+    }
+}
+
+/// Colours for the floating bars ("notches") — chat header, composer, and the
+/// chats list's navigation bar and rows.
+///
+/// Derived from what's actually visible behind them, nudged slightly so the bar
+/// reads as a separate surface: 14% toward white on a dark background, 8%
+/// toward black on a light one. The text colour is then chosen against the
+/// *bar*, not the background.
+///
+/// Checked across the whole RGB cube before being written:
+///   - worst text contrast on a bar: 4.58:1 (WCAG AA is 4.5:1) — always readable;
+///   - the bar is always distinguishable from the background behind it;
+///   - any transparency on the text drops below 4.5:1 somewhere, so secondary
+///     text uses the same colour and differs only in size and weight.
+struct ChromeStyle: Equatable {
+    /// `nil` = use the system bar material (system default background).
+    let fill: Color?
+    let foreground: Color
+    /// Forced on the bars so system controls (text fields, menus) match the fill.
+    let colorScheme: ColorScheme?
+
+    static let system = ChromeStyle(fill: nil, foreground: .primary, colorScheme: nil)
+
+    static func derived(fromVisibleBackground background: RGB) -> ChromeStyle {
+        let bar = background.prefersLightForeground
+            ? background.mixed(with: .white, 0.14)
+            : background.mixed(with: .black, 0.08)
+        let light = bar.prefersLightForeground
+        return ChromeStyle(
+            fill: bar.color,
+            foreground: light ? .white : .black,
+            colorScheme: light ? .dark : .light
+        )
+    }
+}
+
+/// Derives readable foreground colours for an arbitrary user-chosen background.
+enum ContrastPolicy {
+    /// WCAG 2.1 relative luminance.
     static func relativeLuminance(red: Double, green: Double, blue: Double) -> Double {
         func linear(_ c: Double) -> Double {
             c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
@@ -57,42 +111,18 @@ enum ContrastPolicy {
         return (hi + 0.05) / (lo + 0.05)
     }
 
-    /// Black or white, whichever reads better on this background.
-    ///
-    /// Checked across the whole RGB cube before being written: the worst case
-    /// is rgb(75, 125, 135) at **4.58:1**, which still clears WCAG AA (4.5:1).
-    /// So for a solid colour this rule alone is sufficient and no scrim is
-    /// needed — the app can honour the user's exact colour choice.
+    /// Black or white, whichever reads better. Worst case over the RGB cube is
+    /// 4.58:1, so this alone always clears WCAG AA on a solid colour.
     static func foreground(onSolid red: Double, green: Double, blue: Double) -> Color {
-        let bg = relativeLuminance(red: red, green: green, blue: blue)
-        let onWhite = contrastRatio(luminanceA: bg, luminanceB: 1.0)
-        let onBlack = contrastRatio(luminanceA: bg, luminanceB: 0.0)
-        return onWhite >= onBlack ? .white : .black
+        prefersLightForeground(red: red, green: green, blue: blue) ? .white : .black
     }
 
-    /// Whether this background is dark enough that white text suits it.
     static func prefersLightForeground(red: Double, green: Double, blue: Double) -> Bool {
-        foreground(onSolid: red, green: green, blue: blue) == .white
+        let bg = relativeLuminance(red: red, green: green, blue: blue)
+        return contrastRatio(luminanceA: bg, luminanceB: 1.0) >= contrastRatio(luminanceA: bg, luminanceB: 0.0)
     }
 
-    /// Minimum scrim opacity for a **photo** background.
-    ///
-    /// A photo can contain any pixel value, so no single text colour is safe
-    /// against it — the auto black/white rule above only works when the
-    /// background is one known colour. A scrim (a semi-transparent layer
-    /// between photo and text) bounds the possible luminance underneath.
-    ///
-    /// Computed against the adversarial worst case, a pure-white pixel under a
-    /// dark scrim and a pure-black pixel under a light one:
-    ///
-    ///   | opacity | dark scrim + white text | light scrim + black text |
-    ///   |---------|-------------------------|--------------------------|
-    ///   | 0.40    | 2.85:1  fail            | 3.66:1  fail             |
-    ///   | 0.50    | 3.95:1  fail            | 5.32:1  **pass**         |
-    ///   | 0.60    | 5.74:1  **pass**        | 7.37:1  pass             |
-    ///
-    /// Hence 0.60 dark / 0.50 light as the floors. The UI may offer *more*
-    /// scrim, never less.
+    /// Minimum scrim over a photo (measured against a worst-case pixel).
     static let minimumDarkScrimOpacity: Double = 0.60
     static let minimumLightScrimOpacity: Double = 0.50
 }

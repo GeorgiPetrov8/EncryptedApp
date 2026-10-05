@@ -6,6 +6,7 @@ const { requireAuth } = require('../auth');
 const { rateLimit } = require('../rateLimit');
 const { validateEnvelope } = require('../validate');
 const { rowToEnvelopeDTO } = require('../envelopeMapper');
+const { pushForEnvelope } = require('../apns');
 
 const DEFAULT_PAGE_SIZE = 200;
 
@@ -28,7 +29,7 @@ const DEFAULT_PAGE_SIZE = 200;
  * response) idempotent server-side too, on top of the client's own replay
  * protection.
  */
-function sendMessageRoute(store, limiters, presence) {
+function sendMessageRoute(store, limiters, presence, apns, ntfy) {
   const auth = requireAuth(store);
   return async (req, res) => {
     if (!auth(req, res)) return;
@@ -87,6 +88,9 @@ function sendMessageRoute(store, limiters, presence) {
       createdAt,
     );
 
+    pushForEnvelope({ apns, store, presence, envelope: { ...body, createdAt } }).catch(() => {});
+    ntfy.notifyForEnvelope(body, presence).catch(() => {});
+      
     presence.push(body.recipientId, { ...body, createdAt });
     sendJson(res, 202, { accepted: true });
   };

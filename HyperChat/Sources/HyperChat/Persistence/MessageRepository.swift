@@ -37,7 +37,6 @@ final class MessageRepository {
                 .filter(Column("senderId") == senderId)
                 .filter(Column("envelopeId") == envelopeId)
                 .fetchCount(db) > 0
-
             guard !alreadyProcessed else { return false }
 
             try message.insert(db)
@@ -53,24 +52,8 @@ final class MessageRepository {
         }
     }
 
-    /// FIX (shared notepad): marks an envelope processed **without**
-    /// inserting a `Message` row.
-    ///
-    /// A `.notePad` envelope's replay protection needs the exact same
-    /// `processed_envelopes` dedup that chat messages already get (Bug #8) —
-    /// the offline backfill queue and the live WebSocket stream can both
-    /// redeliver the same envelope, and without this check a resent notepad
-    /// op would simply re-merge harmlessly (the CRDT is idempotent) but
-    /// still cost a wasted write and a spurious UI refresh on every replay.
-    /// What it must *not* do is create a `Message` row: a notepad sync was
-    /// never a chat message, and inserting one would put a phantom bubble
-    /// in the conversation timeline with no corresponding user-visible
-    /// content.
-    ///
-    /// Returns whether this call actually recorded the envelope as newly
-    /// processed (`false` if it had already been seen) — `MessagingService`
-    /// uses this the same way `insertIfNotProcessed`'s return value is
-    /// used, to decide whether to publish a UI-refresh notification.
+    /// Marks an envelope processed without inserting a `Message` row
+    /// (control messages: pad, receipts, profile, invite, call, edit).
     @discardableResult
     func markEnvelopeProcessed(envelopeId: String, recipientUserId: String, senderId: String) throws -> Bool {
         try dbQueue.write { db in
@@ -91,8 +74,6 @@ final class MessageRepository {
         }
     }
 
-    /// Binds a media row to its parent message. The ids are set here rather
-    /// than trusted from the caller, so the two rows cannot disagree.
     private static func insertMedia(_ db: Database, media: MediaItem?, message: Message) throws {
         guard var media else { return }
         media.messageId = message.id
@@ -100,8 +81,6 @@ final class MessageRepository {
         try media.insert(db)
     }
 
-    /// Maintains the denormalised ordering column in the same transaction as
-    /// the insert, so the list can never disagree with the history (Bug #15).
     private static func touchConversation(_ db: Database, message: Message) throws {
         try db.execute(sql: """
             UPDATE conversations
@@ -111,7 +90,6 @@ final class MessageRepository {
             """, arguments: [message.createdAt, message.conversationId, message.ownerUserId, message.createdAt])
     }
 
-    /// Cheap pre-check before touching the ratchet at all (Bug #8).
     func isEnvelopeProcessed(envelopeId: String, recipientUserId: String, senderId: String) throws -> Bool {
         try dbQueue.read { db in
             try ProcessedEnvelope
@@ -129,8 +107,6 @@ final class MessageRepository {
         }
     }
 
-    /// Scoped by owner: with ids shared across accounts, an update by `id`
-    /// alone would flip the delivery status on the other account's copy.
     func updateDeliveryStatus(messageId: String, ownerUserId: String, status: DeliveryStatus) throws {
         try dbQueue.write { db in
             if var message = try Message.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId)) {
@@ -139,40 +115,18 @@ final class MessageRepository {
             }
         }
     }
-    
-    func markDelivered(
-        messageId: String,
-        ownerUserId: String,
-        at date: Date
-    ) throws {
-        try dbQueue.write { db in
-            guard var message = try Message.fetchOne(
-                db,
-                key: Self.key(ownerUserId: ownerUserId, id: messageId)
-            ) else {
-                return
-            }
 
-            message.deliveryStatus = .delivered
-            message.deliveredAt = date
-            try message.update(db)
-        }
+    func markDelivered(messageId: String, ownerUserId: String, at date: Date) throws {
+        try markDelivered(messageIds: [messageId], ownerUserId: ownerUserId, at: date)
     }
 
-    func markDelivered(
-        messageIds: [String],
-        ownerUserId: String,
-        at date: Date
-    ) throws {
+    func markDelivered(messageIds: [String], ownerUserId: String, at date: Date) throws {
+        guard !messageIds.isEmpty else { return }
         try dbQueue.write { db in
             for messageId in messageIds {
-                guard var message = try Message.fetchOne(
-                    db,
-                    key: Self.key(ownerUserId: ownerUserId, id: messageId)
-                ) else {
+                guard var message = try Message.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId)) else {
                     continue
                 }
-
                 message.deliveryStatus = .delivered
                 message.deliveredAt = date
                 try message.update(db)
@@ -180,25 +134,47 @@ final class MessageRepository {
         }
     }
 
-    func markRead(
-        messageIds: [String],
-        ownerUserId: String,
-        at date: Date
-    ) throws {
+    func markRead(messageIds: [String], ownerUserId: String, at date: Date) throws {
+        guard !messageIds.isEmpty else { return }
         try dbQueue.write { db in
             for messageId in messageIds {
-                guard var message = try Message.fetchOne(
-                    db,
-                    key: Self.key(ownerUserId: ownerUserId, id: messageId)
-                ) else {
+                guard var message = try Message.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId)) else {
                     continue
                 }
-
                 message.readAt = date
                 try message.update(db)
             }
         }
     }
+
+    // MARK: Edit / delete
+
+    func fetch(messageId: String, ownerUserId: String) throws -> Message? {
+        try dbQueue.read { db in
+            try Message.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId))
+        }
+    }
+
+    /// Replaces a message's stored (storage-key-encrypted) content after an edit.
+    func updateContent(messageId: String, ownerUserId: String, encryptedContent: Data, editedAt: Date) throws {
+        try dbQueue.write { db in
+            guard var message = try Message.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId)) else {
+                return
+            }
+            message.encryptedContent = encryptedContent
+            message.editedAt = editedAt
+            try message.update(db)
+        }
+    }
+
+    /// "Delete for me". The media row goes with it via the foreign-key cascade.
+    func delete(messageId: String, ownerUserId: String) throws {
+        try dbQueue.write { db in
+            _ = try Message.deleteOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId))
+        }
+    }
+
+    // MARK: Queries
 
     func fetchMessages(conversationId: String, ownerUserId: String) throws -> [Message] {
         try dbQueue.read { db in

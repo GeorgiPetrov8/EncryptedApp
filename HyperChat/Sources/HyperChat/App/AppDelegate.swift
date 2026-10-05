@@ -2,46 +2,26 @@ import SwiftUI
 import UserNotifications
 import os
 
-/// Handles notification delivery and taps.
-///
-/// FIX (Pack 8, Critical #4): tapping an alarm notification from a cold start
-/// now actually starts the challenge.
-///
-/// `container` is assigned in the App's `.task`, which runs after the first
-/// view appears. On a cold start iOS delivers `didReceive response:` during
-/// launch — before that view exists — so the tap used to find
-/// `container == nil` and was dropped. The alarm was scheduled, the app opened,
-/// and nothing rang: the exact scenario an alarm exists for was the one that
-/// silently failed.
-///
-/// The tap is now buffered until the container exists, then consumed.
-///
-/// `@MainActor` on the whole class (rather than `MainActor.run` blocks) so the
-/// `container` `didSet` can call main-actor code directly. The async
-/// `UNUserNotificationCenterDelegate` methods still satisfy their nonisolated
-/// protocol requirements, because an actor-isolated async method is a valid
-/// witness for a nonisolated async requirement.
+/// Notification delivery and taps, plus APNs device-token registration.
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
 
-    /// Set from the App's `.task`. Until then, alarm taps are buffered.
     var container: AppContainer? {
         didSet {
-            guard container != nil else { return }
+            guard let container else { return }
             consumePendingAlarmIfNeeded()
+            if let token = pendingDeviceToken {
+                pendingDeviceToken = nil
+                container.pushService.didRegister(deviceToken: token)
+            }
         }
     }
 
-    /// An alarm tap that arrived before the container existed. Carries the
-    /// delivery date so staleness is judged against when the notification
-    /// actually fired, not when the app finished launching.
     private var pendingAlarm: (id: String, firedAt: Date)?
+    /// APNs can hand over the token before the container exists.
+    private var pendingDeviceToken: Data?
 
-    private let logger = Logger(subsystem: "com.HyperChat", category: "alarm")
-
-    /// Matches `AlarmService.autoExpiry`: a tap after this window is
-    /// archaeology, not a wake-up. Without it, tapping yesterday's alarm in
-    /// Notification Centre would start a full challenge with audio.
+    private let logger = Logger(subsystem: "com.HyperChat", category: "app")
     private static let staleAfter: TimeInterval = AlarmService.autoExpiry
 
     func application(
@@ -52,8 +32,24 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         return true
     }
 
-    /// Without this, a notification arriving while the app is open is
-    /// suppressed entirely.
+    // MARK: Push registration
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        if let container {
+            container.pushService.didRegister(deviceToken: deviceToken)
+        } else {
+            pendingDeviceToken = deviceToken
+        }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        // Typical causes: running in the Simulator without a paired device,
+        // or the Push Notifications capability missing from the target.
+        logger.error("APNs registration failed: \(error.localizedDescription, privacy: .public)")
+    }
+
+    // MARK: Notifications
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
@@ -74,9 +70,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
               let alarmId = content.userInfo["alarmId"] as? String else { return }
 
         guard let container else {
-            // Cold start: buffer rather than drop — this is the path that used
-            // to lose the tap.
-            logger.debug("Alarm tap arrived before launch finished; buffering")
             pendingAlarm = (alarmId, firedAt)
             return
         }

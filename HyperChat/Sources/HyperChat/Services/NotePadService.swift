@@ -2,42 +2,31 @@ import Foundation
 import Combine
 import os
 
-/// Orchestrates the shared notepad: local mutations, the CRDT merge, and
-/// (via an injected send handler) transmission through the same encrypted
-/// channel chat messages use.
-///
-/// `@MainActor` + `ObservableObject` for the same reason `MessagingService`
-/// is: SwiftUI views read `@Published` state directly, and every call site
-/// that touches the database or crypto layer here is already expected to be
-/// on the main actor by those layers' own isolation.
+/// Orchestrates the shared notepad: local edits, the merge, and transmission
+/// through the same encrypted channel chat messages use.
 @MainActor
 final class NotePadService: ObservableObject {
-    /// Keyed by `conversationId`. A dictionary rather than one flat array
-    /// because a device can have many conversations, each with its own
-    /// independent pad, and a view for conversation A must never flash
-    /// conversation B's items during the moment between "an envelope for B
-    /// arrived" and "this dictionary finishes updating."
     @Published private(set) var itemsByConversation: [String: [NotePadItem]] = [:]
 
     private let repository: NotePadRepository
+    private let conversationRepository: ConversationRepository
     private let authService: AuthService
+    private let defaults: UserDefaults
     private let logger = Logger(subsystem: "com.HyperChat", category: "notePad")
 
-    /// FIX: breaks a construction-order dependency cycle, the same pattern
-    /// already used by `AuthService.setLogoutHandler` and by
-    /// `SessionTokenStore` existing independently of both
-    /// `AuthService`/`RealAPIClient`.
-    ///
-    /// `NotePadService` needs to *transmit* an encrypted envelope, which is
-    /// `MessagingService`'s job. `MessagingService` needs to *hold* a
-    /// `NotePadService` so `handleIncoming` can route `.notePad` envelopes
-    /// to it. Neither can be the other's constructor parameter without a
-    /// cycle. `AppContainer` constructs both, then wires this closure.
     private var sendHandler: ((NotePadOperation, Conversation) async throws -> Void)?
+    private var flushing: Set<String> = []
 
-    init(repository: NotePadRepository, authService: AuthService) {
+    init(
+        repository: NotePadRepository,
+        conversationRepository: ConversationRepository,
+        authService: AuthService,
+        defaults: UserDefaults = .standard
+    ) {
         self.repository = repository
+        self.conversationRepository = conversationRepository
         self.authService = authService
+        self.defaults = defaults
     }
 
     func setSendHandler(_ handler: @escaping (NotePadOperation, Conversation) async throws -> Void) {
@@ -48,96 +37,70 @@ final class NotePadService: ObservableObject {
         itemsByConversation[conversationId] ?? []
     }
 
-    /// Call when a `NotePadView` appears — populates `itemsByConversation`
-    /// for that conversation from disk so the view has something to show
-    /// before any network activity happens (this is a local-first feature;
-    /// the pad works fully offline, the same as everything else in this app).
     func loadItems(for conversation: Conversation) {
         guard let myUserId = authService.currentUserId else { return }
         refreshPublishedState(ownerUserId: myUserId, conversationId: conversation.id)
     }
 
-    // MARK: Local mutations
-    //
-    // Every one of these funnels through `apply`, which runs the exact same
-    // merge-then-maybe-transmit path a *remote* operation takes through
-    // `applyRemoteOperation`. "I edited it myself" and "my peer edited it"
-    // are the same code path with a different origin, not two paths that
-    // could quietly drift apart from each other over time.
+    // MARK: Local edits
 
     func addItem(text: String, in conversation: Conversation) async {
         guard let myUserId = authService.currentUserId else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let op = NotePadOperation(
-            itemId: UUID().uuidString,
-            text: trimmed,
-            isDone: false,
-            isDeleted: false,
-            updatedAt: Date(),
-            updatedBy: myUserId
+        await apply(
+            NotePadOperation(itemId: UUID().uuidString, text: trimmed, isDone: false, isDeleted: false,
+                             updatedAt: Date(), updatedBy: myUserId),
+            in: conversation, ownerUserId: myUserId
         )
-        await apply(op, in: conversation, ownerUserId: myUserId)
     }
 
     func toggleItem(_ item: NotePadItem, in conversation: Conversation) async {
-        guard let myUserId = authService.currentUserId else { return }
-        let op = NotePadOperation(
-            itemId: item.itemId,
-            text: item.text,
-            isDone: !item.isDone,
-            isDeleted: item.isDeleted,
-            updatedAt: Date(),
-            updatedBy: myUserId
-        )
-        await apply(op, in: conversation, ownerUserId: myUserId)
+        await edit(item, in: conversation) { $0.isDone.toggle() }
     }
 
     func updateText(_ item: NotePadItem, newText: String, in conversation: Conversation) async {
-        guard let myUserId = authService.currentUserId else { return }
         let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let op = NotePadOperation(
-            itemId: item.itemId,
-            text: trimmed,
-            isDone: item.isDone,
-            isDeleted: item.isDeleted,
-            updatedAt: Date(),
-            updatedBy: myUserId
-        )
-        await apply(op, in: conversation, ownerUserId: myUserId)
+        await edit(item, in: conversation) { $0.text = trimmed }
     }
 
     func deleteItem(_ item: NotePadItem, in conversation: Conversation) async {
-        guard let myUserId = authService.currentUserId else { return }
-        // Tombstone, not a hard delete — see `NotePadItem.isDeleted`'s doc
-        // comment for why a hard delete would break convergence against a
-        // concurrently in-flight edit to the same item from the peer.
-        let op = NotePadOperation(
-            itemId: item.itemId,
-            text: item.text,
-            isDone: item.isDone,
-            isDeleted: true,
-            updatedAt: Date(),
-            updatedBy: myUserId
-        )
-        await apply(op, in: conversation, ownerUserId: myUserId)
+        // Tombstone, not a hard delete — see `NotePadItem.isDeleted`.
+        await edit(item, in: conversation) { $0.isDeleted = true }
     }
 
-    /// Applies a locally-originated operation optimistically — the checkbox
-    /// flips instantly regardless of whether the peer is even reachable
-    /// right now, the same offline-first behaviour every other part of this
-    /// app already has — then attempts to transmit it.
+    /// Applies a change to the *current* stored item (not the possibly stale
+    /// copy the view holds) with a timestamp that is guaranteed to win.
+    private func edit(_ item: NotePadItem, in conversation: Conversation, _ change: (inout NotePadItem) -> Void) async {
+        guard let myUserId = authService.currentUserId else { return }
+        let current = (try? repository.fetchAll(ownerUserId: myUserId, conversationId: conversation.id))?
+            .first { $0.itemId == item.itemId } ?? item
+        var updated = current
+        change(&updated)
+        await apply(
+            NotePadOperation(itemId: updated.itemId, text: updated.text, isDone: updated.isDone,
+                             isDeleted: updated.isDeleted,
+                             updatedAt: Self.timestamp(after: current.updatedAt),
+                             updatedBy: myUserId),
+            in: conversation, ownerUserId: myUserId
+        )
+    }
+
+    /// FIX (clock skew): a new edit is always stamped after the version it
+    /// replaces.
     ///
-    /// A transmit failure here is not retried by anything: the operation is
-    /// durably merged into the local pad (so the user's own view of it is
-    /// never lost), but if `sendHandler` throws — e.g. no network at the
-    /// moment — the peer simply doesn't receive this particular edit until
-    /// the next successful one for the same item arrives and (being the
-    /// full item state, not a delta) happens to carry a still-current
-    /// picture forward. A dedicated outbox with automatic retry would close
-    /// that gap for real; see this pack's `CHANGES-NotePad.md` for why it's
-    /// out of scope here.
+    /// Conflicts are decided by the latest `updatedAt`. When the other phone's
+    /// clock ran fast, its edits carried future times and beat every edit
+    /// made here until this clock caught up — your own change was silently
+    /// ignored, possibly for hours. Stamping at least 1 ms past the current
+    /// version means a deliberate edit always wins, and both phones still
+    /// agree because they compare the same values. (Clamping times on
+    /// arrival instead would make the two phones disagree.)
+    static func timestamp(after previous: Date, now: Date = Date()) -> Date {
+        max(now, previous.addingTimeInterval(0.001))
+    }
+
     private func apply(_ operation: NotePadOperation, in conversation: Conversation, ownerUserId: String) async {
         let candidate = NotePadItem(
             ownerUserId: ownerUserId,
@@ -156,28 +119,30 @@ final class NotePadService: ObservableObject {
             logger.error("Failed to persist local notepad edit")
             return
         }
-
         refreshPublishedState(ownerUserId: ownerUserId, conversationId: conversation.id)
-
-        // If the merge was a no-op (this edit lost to a newer one already
-        // on disk — possible if a remote op for the same item arrived a
-        // moment earlier), there's nothing new to tell the peer about.
         guard result.changed else { return }
 
+        // FIX (outbox): recorded as unsent *before* trying, cleared only on
+        // success. Edits made offline, before an invitation was accepted, or
+        // while the server was down are retried on reconnect and on opening
+        // the pad, instead of being lost.
+        markPending(itemId: operation.itemId, version: operation.updatedAt,
+                    conversationId: conversation.id, ownerUserId: ownerUserId)
+        await send(operation, in: conversation, ownerUserId: ownerUserId)
+    }
+
+    private func send(_ operation: NotePadOperation, in conversation: Conversation, ownerUserId: String) async {
         do {
             try await sendHandler?(operation, conversation)
+            clearPending(itemId: operation.itemId, version: operation.updatedAt,
+                         conversationId: conversation.id, ownerUserId: ownerUserId)
         } catch {
-            logger.error("Failed to transmit notepad operation; local state is still correct")
+            logger.info("Notepad edit not sent yet; it will be retried")
         }
     }
 
-    /// Called by `MessagingService.handleIncoming` for an inbound
-    /// `.notePad` envelope, after Double Ratchet decryption but before
-    /// anything resembling chat-message bookkeeping happens — a notepad
-    /// sync never becomes a `Message` row (see `EnvelopePayloadKind`'s doc
-    /// comment for why), so there is nothing here that looks like
-    /// `incomingMessage` publishing; the UI refresh is `itemsByConversation`
-    /// changing, which `NotePadViewModel` observes directly.
+    // MARK: Remote edits
+
     func applyRemoteOperation(_ operation: NotePadOperation, conversationId: String, ownerUserId: String) {
         let candidate = NotePadItem(
             ownerUserId: ownerUserId,
@@ -198,58 +163,112 @@ final class NotePadService: ObservableObject {
         refreshPublishedState(ownerUserId: ownerUserId, conversationId: conversationId)
     }
 
+    // MARK: Outbox
+
+    /// Sends this conversation's unsent edits (current state of each item).
+    ///
+    /// FIX: replaces `resyncOwnItems`, which re-sent *every* item — including
+    /// the other person's — each time the pad was opened: one encrypted
+    /// envelope per item per open, for nothing.
+    func flushPending(in conversation: Conversation) async {
+        guard let myUserId = authService.currentUserId,
+              !flushing.contains(conversation.id) else { return }
+        let pending = loadPending(ownerUserId: myUserId)[conversation.id] ?? [:]
+        guard !pending.isEmpty else { return }
+
+        flushing.insert(conversation.id)
+        defer { flushing.remove(conversation.id) }
+
+        let items = (try? repository.fetchAll(ownerUserId: myUserId, conversationId: conversation.id)) ?? []
+        for item in items where pending[item.itemId] != nil {
+            let operation = NotePadOperation(
+                itemId: item.itemId, text: item.text, isDone: item.isDone, isDeleted: item.isDeleted,
+                updatedAt: item.updatedAt, updatedBy: item.updatedBy
+            )
+            await send(operation, in: conversation, ownerUserId: myUserId)
+        }
+        // Items that no longer exist locally have nothing left to send.
+        let existing = Set(items.map(\.itemId))
+        for itemId in pending.keys where !existing.contains(itemId) {
+            dropPending(itemId: itemId, conversationId: conversation.id, ownerUserId: myUserId)
+        }
+    }
+
+    /// Flushes every conversation with unsent edits (on reconnect / launch).
+    func flushAllPending() async {
+        guard let myUserId = authService.currentUserId else { return }
+        for conversationId in loadPending(ownerUserId: myUserId).keys {
+            guard let conversation = try? conversationRepository.fetch(id: conversationId, ownerUserId: myUserId) else {
+                dropConversation(conversationId, ownerUserId: myUserId)
+                continue
+            }
+            await flushPending(in: conversation)
+        }
+    }
+
+    /// Kept so older call sites compile; now only sends unsent edits.
+    func resyncOwnItems(in conversation: Conversation) async {
+        await flushPending(in: conversation)
+    }
+
+    // Stored as [conversationId: [itemId: version]] per account. The version
+    // check on clear means a newer edit made while an older one was in
+    // flight isn't marked as sent by mistake.
+    private typealias Pending = [String: [String: Double]]
+
+    private func pendingKey(_ owner: String) -> String { "notepad.pending.\(owner)" }
+
+    private func loadPending(ownerUserId: String) -> Pending {
+        guard let data = defaults.data(forKey: pendingKey(ownerUserId)),
+              let decoded = try? JSONDecoder().decode(Pending.self, from: data) else { return [:] }
+        return decoded
+    }
+
+    private func savePending(_ pending: Pending, ownerUserId: String) {
+        let cleaned = pending.filter { !$0.value.isEmpty }
+        defaults.set(try? JSONEncoder().encode(cleaned), forKey: pendingKey(ownerUserId))
+    }
+
+    private func markPending(itemId: String, version: Date, conversationId: String, ownerUserId: String) {
+        var pending = loadPending(ownerUserId: ownerUserId)
+        pending[conversationId, default: [:]][itemId] = version.timeIntervalSince1970
+        savePending(pending, ownerUserId: ownerUserId)
+    }
+
+    private func clearPending(itemId: String, version: Date, conversationId: String, ownerUserId: String) {
+        var pending = loadPending(ownerUserId: ownerUserId)
+        guard let stored = pending[conversationId]?[itemId],
+              stored <= version.timeIntervalSince1970 else { return }
+        pending[conversationId]?[itemId] = nil
+        savePending(pending, ownerUserId: ownerUserId)
+    }
+
+    private func dropPending(itemId: String, conversationId: String, ownerUserId: String) {
+        var pending = loadPending(ownerUserId: ownerUserId)
+        pending[conversationId]?[itemId] = nil
+        savePending(pending, ownerUserId: ownerUserId)
+    }
+
+    private func dropConversation(_ conversationId: String, ownerUserId: String) {
+        var pending = loadPending(ownerUserId: ownerUserId)
+        pending[conversationId] = nil
+        savePending(pending, ownerUserId: ownerUserId)
+    }
+
+    // MARK: State
+
     private func refreshPublishedState(ownerUserId: String, conversationId: String) {
         let loaded = (try? repository.fetchAll(ownerUserId: ownerUserId, conversationId: conversationId)) ?? []
         itemsByConversation[conversationId] = loaded
     }
 
-    /// Re-sends the current state of this user's notepad items.
-    ///
-    /// Each item is transmitted as a complete state rather than a delta,
-    /// so sending the same operation more than once is safe: the receiving
-    /// side uses `upsertIfNewer` and ignores an older/equal state.
-    func resyncOwnItems(in conversation: Conversation) async {
-        guard let myUserId = authService.currentUserId else { return }
-
-        let currentItems =
-            (try? repository.fetchAll(
-                ownerUserId: myUserId,
-                conversationId: conversation.id
-            )) ?? []
-
-        for item in currentItems {
-            let operation = NotePadOperation(
-                itemId: item.itemId,
-                text: item.text,
-                isDone: item.isDone,
-                isDeleted: item.isDeleted,
-                updatedAt: item.updatedAt,
-                updatedBy: item.updatedBy
-            )
-
-            do {
-                try await sendHandler?(operation, conversation)
-            } catch {
-                logger.error("Failed to resync notepad item \(item.itemId)")
-            }
-        }
-    }
-    
-    /// Clears the in-memory cache on logout, so a different local account
-    /// signing in next doesn't briefly see the previous account's pad
-    /// before its own `loadItems` call runs. Does **not** touch the
-    /// database — logout must never destroy data (Bug #10); only
-    /// `AccountDeletionService` (via `deleteAllOnDisk`) actually deletes rows.
     func clearInMemoryState() {
         itemsByConversation.removeAll()
     }
 
-    /// Used by `AccountDeletionService`. Named distinctly from
-    /// `clearInMemoryState()` so the "this permanently deletes from disk"
-    /// and "this just resets a view-layer cache" operations can never be
-    /// confused for each other at a call site.
     func deleteAllOnDisk(ownerUserId: String) throws {
         try repository.deleteAll(ownerUserId: ownerUserId)
+        defaults.removeObject(forKey: pendingKey(ownerUserId))
         itemsByConversation.removeAll()
     }
 }

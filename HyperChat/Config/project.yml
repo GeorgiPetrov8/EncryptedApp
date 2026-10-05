@@ -18,17 +18,25 @@ packages:
   GRDB:
     url: https://github.com/groue/GRDB.swift.git
     from: 6.29.0
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    branch: latest
 targets:
   HyperChat:
     type: application
     platform: iOS
     sources:
       - path: ../Sources/HyperChat
+        excludes:
+          - Info.plist
+          - "*.entitlements"
     dependencies:
       - package: GRDB
         product: GRDB
+      - package: WebRTC
+        product: WebRTC
     info:
-      path: ../Sources/HyperChat/Info.plist
+      path: HyperChat/Sources/HyperChat/Info.plist
       properties:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:

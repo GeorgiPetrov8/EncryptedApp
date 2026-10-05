@@ -4,9 +4,10 @@ import PhotosUI
 struct SettingsView: View {
     @EnvironmentObject private var container: AppContainer
     @State private var showDeleteConfirmation = false
-    @State private var showAppearance = false
+    @State private var appearanceScope: AppearanceScope?
     @State private var selectedAvatar: PhotosPickerItem?
     @State private var errorMessage: String?
+    @State private var offerLocalOnlyDeletion = false
 
     var body: some View {
         Form {
@@ -26,8 +27,8 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
-        .sheet(isPresented: $showAppearance) {
-            AppearanceSettingsView(conversationId: nil)
+        .sheet(item: $appearanceScope) { scope in
+            AppearanceSettingsView(scope: scope)
                 .environmentObject(container)
         }
         .onChange(of: selectedAvatar) { _, item in
@@ -39,14 +40,25 @@ struct SettingsView: View {
             isPresented: $showDeleteConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Delete Everything", role: .destructive, action: deleteAccount)
+            Button("Delete Everything", role: .destructive) {
+                deleteAccount()
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Your keys and message history will be erased from this device and cannot be restored.")
+            Text("Your keys and message history will be erased from this device. Without a backup they cannot be restored.")
+        }
+        .alert("Couldn't reach the server", isPresented: $offerLocalOnlyDeletion) {
+            Button("Delete from this device only", role: .destructive) {
+                deleteAccount(includeServer: false)
+            }
+
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your account will stay on the server, and your username stays taken. Try again when you're online to remove it completely.")
         }
     }
 
-    // MARK: Profile (problem 3)
+    // MARK: Profile
 
     private var profileSection: some View {
         Section {
@@ -58,20 +70,16 @@ struct SettingsView: View {
                     size: 72
                 )
                 .overlay {
-                    if container.profileService.isUpdating {
-                        ProgressView()
-                    }
+                    if container.profileService.isUpdating { ProgressView() }
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(container.authService.currentUsername ?? "")
                         .font(.headline)
-
                     PhotosPicker(selection: $selectedAvatar, matching: .images) {
                         Text(myAvatar == nil ? "Add photo" : "Change photo")
                     }
                     .disabled(container.profileService.isUpdating)
-
                     if myAvatar != nil {
                         Button("Remove photo", role: .destructive) {
                             Task { await container.profileService.removeMyAvatar() }
@@ -100,29 +108,53 @@ struct SettingsView: View {
             if let username = container.authService.currentUsername {
                 LabeledContent("Username", value: username)
             }
+            NavigationLink {
+                NotificationSettingsView()
+            } label: {
+                Label("Notifications", systemImage: "bell")
+            }
+            NavigationLink {
+                RecoverySettingsView()
+            } label: {
+                HStack {
+                    Label("Account recovery", systemImage: "lifepreserver")
+                    Spacer()
+                    if container.recoveryService.emailStatus?.verified != true {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("Not set up")
+                    }
+                }
+            }
             Button("Log Out") {
                 container.authService.logout()
             }
         }
+        .task { await container.recoveryService.refreshEmailStatus() }
     }
 
-    // MARK: Appearance (problem 1)
+    // MARK: Appearance
 
     private var appearanceSection: some View {
         Section {
             Button {
-                showAppearance = true
+                appearanceScope = .chatList
+            } label: {
+                Label("Chats list background", systemImage: "list.bullet.rectangle")
+            }
+            Button {
+                appearanceScope = .allChats
             } label: {
                 Label("Chat background", systemImage: "paintbrush")
             }
         } header: {
             Text("Appearance")
         } footer: {
-            Text("Applies to every chat that doesn't have its own background. Set one for a single chat from the brush icon inside it.")
+            Text("“Chat background” applies to every chat without its own. Set one for a single chat from the ⋯ menu inside it.")
         }
     }
 
-    // MARK: Privacy (problems 2 & 4)
+    // MARK: Privacy
 
     private var privacySection: some View {
         Section {
@@ -157,13 +189,11 @@ struct SettingsView: View {
                     }
                 }
             }
-        } footer: {
-            Text("Alarms that won't switch off until you've solved a few problems — or messaged someone a word, so they know you're up.")
         }
     }
 
     private var syncSection: some View {
-        Section {
+        Section("Sync") {
             LabeledContent("Connection") {
                 Text(container.messagingService.isListening ? "Connected" : "Not connected")
                     .foregroundStyle(container.messagingService.isListening ? .green : .orange)
@@ -173,15 +203,11 @@ struct SettingsView: View {
                     container.messagingService.startListening()
                 }
             }
-        } header: {
-            Text("Sync")
-        } footer: {
-            Text("HyperChat downloads anything sent while you were offline the next time it connects.")
         }
     }
 
     private var appLockSection: some View {
-        Section {
+        Section("App Lock") {
             Toggle("Require Face ID / passcode", isOn: Binding(
                 get: { container.appLockService.isEnabled },
                 set: { container.appLockService.isEnabled = $0 }
@@ -196,10 +222,6 @@ struct SettingsView: View {
                     in: 0...30
                 )
             }
-        } header: {
-            Text("App Lock")
-        } footer: {
-            Text("HyperChat has no password. Your message history is encrypted with a key held in this device's Keychain and released only after you authenticate.")
         }
     }
 
@@ -210,8 +232,6 @@ struct SettingsView: View {
             }
         } header: {
             Text("Danger Zone")
-        } footer: {
-            Text("Permanently removes this account's keys, conversations, messages, shared pads, alarms, photos and cached attachments from this device. This cannot be undone.")
         }
     }
 
@@ -228,18 +248,21 @@ struct SettingsView: View {
         }
     }
 
-    private func deleteAccount() {
+    private func deleteAccount(includeServer: Bool = true) {
         guard let userId = container.authService.currentUserId else { return }
-        do {
-            container.messagingService.stopListening()
-            container.presenceService.stop()
-            container.alarmService.stopForLogout()
-            container.profileService.deleteLocalData(ownerUserId: userId)
-            container.messagingService.clearPendingHandshakes(ownerUserId: userId)
-            try container.accountDeletionService.deleteAccount(userId: userId)
-            container.authService.logout()
-        } catch {
-            errorMessage = "Couldn't delete the account: \(error.localizedDescription)"
+        Task {
+            do {
+                try await container.accountDeletionService.deleteAccount(userId: userId, includeServer: includeServer)
+                container.messagingService.stopListening()
+                container.presenceService.stop()
+                container.alarmService.stopForLogout()
+                container.profileService.deleteLocalData(ownerUserId: userId)
+                container.authService.logout()
+            } catch AccountDeletionError.serverUnreachable {
+                offerLocalOnlyDeletion = true
+            } catch {
+                errorMessage = "Couldn't delete the account: \(error.localizedDescription)"
+            }
         }
     }
 }

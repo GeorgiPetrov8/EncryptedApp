@@ -19,16 +19,28 @@ struct ConversationListView: View {
         )
     }
 
+    private var listAppearance: ChatAppearance { container.appearanceStore.listAppearance }
+    private var chrome: ChromeStyle { container.appearanceStore.chrome(for: listAppearance) }
+
     var body: some View {
         NavigationStack {
             list
+                .scrollContentBackground(.hidden)
+                .background {
+                    ChatBackgroundView(appearance: listAppearance) {
+                        container.appearanceStore.imageURL(fileName: $0)
+                    }
+                }
                 .navigationTitle("Chats")
                 .toolbar { toolbarContent }
+                // The navigation bar takes the same derived colour as the chat
+                // notches; its title is forced to the readable scheme.
+                .toolbarBackground(navigationBarFill, for: .navigationBar)
+                .toolbarBackground(chrome.fill == nil ? .automatic : .visible, for: .navigationBar)
+                .toolbarColorScheme(chrome.colorScheme, for: .navigationBar)
                 .navigationDestination(item: $navigateToConversation) { conversation in
                     ChatView(container: container, conversation: conversation)
                 }
-                // FIX (problem 5): "new chat" now sends an invitation instead
-                // of opening a chat you can write into directly.
                 .sheet(isPresented: $showNewInvitation) {
                     NewInvitationView { conversation in
                         showNewInvitation = false
@@ -50,18 +62,21 @@ struct ConversationListView: View {
                 }
                 .task { await container.invitationService.requestNotificationPermission() }
         }
-        // FIX (calls): the call screen covers everything while a call is in
-        // progress — including an incoming call while you're in another chat.
         .fullScreenCover(isPresented: isCallPresented) {
             CallView()
                 .environmentObject(container)
         }
     }
 
+    private var navigationBarFill: AnyShapeStyle {
+        if let fill = chrome.fill { return AnyShapeStyle(fill) }
+        return AnyShapeStyle(.bar)
+    }
+
     private var isCallPresented: Binding<Bool> {
         Binding(
             get: { container.callService.phase != .idle },
-            set: { _ in } // dismissed by the call ending, never by a swipe
+            set: { _ in }
         )
     }
 
@@ -75,6 +90,8 @@ struct ConversationListView: View {
                     systemImage: "bubble.left.and.bubble.right",
                     description: Text("Tap the compose button to invite someone to an encrypted chat.")
                 )
+                .foregroundStyle(chrome.fill == nil ? Color.primary : listAppearance.foregroundColor)
+                .listRowBackground(Color.clear)
             }
             ForEach(viewModel.summaries) { summary in
                 Button {
@@ -84,10 +101,25 @@ struct ConversationListView: View {
                         summary: summary,
                         avatar: avatar(for: summary.peerId),
                         isOnline: summary.relationshipState == .accepted
-                            && container.presenceService.isOnline(summary.peerId)
+                            && container.presenceService.isOnline(summary.peerId),
+                        chrome: chrome
                     )
                 }
+                .listRowBackground(rowBackground)
+                .listRowSeparator(chrome.fill == nil ? .automatic : .hidden)
             }
+        }
+        .listRowSpacing(chrome.fill == nil ? 0 : 8)
+    }
+
+    /// On a custom background each row is a small notch of its own, so names
+    /// read against the derived bar colour rather than the photo/colour behind.
+    @ViewBuilder
+    private var rowBackground: some View {
+        if let fill = chrome.fill {
+            RoundedRectangle(cornerRadius: 16, style: .continuous).fill(fill)
+        } else {
+            Color(.systemBackground)
         }
     }
 
@@ -149,6 +181,12 @@ private struct ConversationRow: View {
     let summary: ConversationSummary
     let avatar: Data?
     let isOnline: Bool
+    let chrome: ChromeStyle
+
+    /// On a custom background, name and preview use the bar's readable colour
+    /// at full strength (preview differs by size/weight, not transparency).
+    private var primary: Color { chrome.fill == nil ? .primary : chrome.foreground }
+    private var secondary: Color { chrome.fill == nil ? .secondary : chrome.foreground }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -164,11 +202,11 @@ private struct ConversationRow: View {
                 HStack {
                     Text(summary.otherUsername)
                         .font(.headline)
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(primary)
                     if summary.isVerified {
                         Image(systemName: "checkmark.shield.fill")
                             .font(.caption2)
-                            .foregroundStyle(.green)
+                            .foregroundStyle(chrome.fill == nil ? Color.green : chrome.foreground)
                             .accessibilityLabel("Identity verified")
                     }
                     if summary.hasIdentityWarning {
@@ -181,27 +219,28 @@ private struct ConversationRow: View {
                     if let date = summary.lastActivityAt {
                         Text(date, style: .time)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(secondary)
                     }
                 }
                 HStack(spacing: 4) {
                     stateIcon
                     Text(summary.lastMessagePreview)
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(secondary)
                         .lineLimit(1)
                 }
             }
         }
+        .padding(.vertical, chrome.fill == nil ? 0 : 4)
     }
 
     @ViewBuilder
     private var stateIcon: some View {
         switch summary.relationshipState {
         case .invitedByMe:
-            Image(systemName: "hourglass").font(.caption).foregroundStyle(.orange)
+            Image(systemName: "hourglass").font(.caption).foregroundStyle(secondary)
         case .declined:
-            Image(systemName: "xmark.circle").font(.caption).foregroundStyle(.red)
+            Image(systemName: "xmark.circle").font(.caption).foregroundStyle(secondary)
         case .accepted, .invitedByThem:
             EmptyView()
         }
@@ -220,11 +259,9 @@ private struct ConnectionIndicator: View {
             } else if !isListening {
                 Image(systemName: "bolt.horizontal.circle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
                 Text("Not connected").font(.caption2)
             }
         }
-        .foregroundStyle(.secondary)
         .accessibilityElement(children: .combine)
     }
 }

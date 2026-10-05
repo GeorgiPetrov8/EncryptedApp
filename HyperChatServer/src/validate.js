@@ -3,23 +3,29 @@
 const { isValidBase64 } = require('./json');
 
 /**
- * Server-side shape validation for key material.
- *
- * The server is zero-knowledge — it never uses these bytes cryptographically
- * and cannot tell a valid Curve25519 point from random noise. But it *can*
- * cheaply check that a field claiming to be an X25519/Ed25519 key is exactly
- * 32 bytes, and that a signature is exactly 64 bytes, before ever writing it
- * to disk. That closes off a cheap storage-bloat / malformed-data denial of
- * service: without this, a client (or attacker with a stolen session token)
- * could POST arbitrarily large "keys" and have the server persist them
- * forever in `accounts`/`one_time_prekeys`.
+ * Server-side shape validation. The server never uses these bytes
+ * cryptographically, but it can cheaply reject malformed or oversized
+ * "keys" before they're stored.
  */
 const X25519_KEY_BYTES = 32;
 const ED25519_KEY_BYTES = 32;
 const ED25519_SIGNATURE_BYTES = 64;
 
 const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
-const USER_ID_RE = /^[a-zA-Z0-9-]{1,64}$/; // Swift UUID().uuidString shape, kept loose
+const USER_ID_RE = /^[a-zA-Z0-9-]{1,64}$/;
+
+/**
+ * Every envelope content type the app sends.
+ *
+ * FIX: 'call' and 'edit' were missing, so the server answered every call
+ * signal and every message edit with 400 — calls could never connect and
+ * edits never reached the other side. Keep this list in sync with
+ * `EnvelopePayloadKind` in DTOs.swift; `test/server.test.js` checks it.
+ */
+const ALLOWED_CONTENT_TYPES = [
+  'text', 'image', 'video', 'file',
+  'notePad', 'receipt', 'profile', 'invite', 'call', 'edit',
+];
 
 function isValidUsername(value) {
   return typeof value === 'string' && USERNAME_RE.test(value);
@@ -33,7 +39,6 @@ function isValidUInt32(value) {
   return Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
 }
 
-/** Validates the shape of a `PreKeyBundleUpload`. Returns an error string, or null if valid. */
 function validateBundleUpload(body) {
   if (!body || typeof body !== 'object') return 'malformed body';
   if (!isValidUserId(body.userId)) return 'invalid userId';
@@ -89,10 +94,6 @@ function validateOneTimePreKeyBatch(body) {
   return null;
 }
 
-// Generous but bounded: text messages are small; images/videos go through
-// /media as their own upload, so the ratchet payload here is just a JSON key
-// pointer for those, never the file itself. 256 KiB comfortably covers a
-// worst-case oversized handshake payload with room to spare.
 const MAX_RATCHET_MESSAGE_BYTES = 256 * 1024;
 const MAX_ENVELOPE_ID_LENGTH = 128;
 
@@ -101,12 +102,8 @@ function validateEnvelope(body) {
   if (typeof body.id !== 'string' || body.id.length === 0 || body.id.length > MAX_ENVELOPE_ID_LENGTH) {
     return 'invalid id';
   }
-  if (!isValidUserId(body.conversationId) && !/^[a-f0-9]{64}$/.test(body.conversationId || '')) {
-    // Accepts both legacy UUID-shaped ids and the SHA-256 hex deterministic
-    // ids the client computes for 1:1 conversations.
-    if (typeof body.conversationId !== 'string' || body.conversationId.length === 0) {
-      return 'invalid conversationId';
-    }
+  if (typeof body.conversationId !== 'string' || body.conversationId.length === 0 || body.conversationId.length > 128) {
+    return 'invalid conversationId';
   }
   if (!isValidUserId(body.senderId)) return 'invalid senderId';
   if (!isValidUserId(body.recipientId)) return 'invalid recipientId';
@@ -114,23 +111,7 @@ function validateEnvelope(body) {
   if (!isValidBase64(body.ratchetMessage) || Buffer.from(body.ratchetMessage, 'base64').length > MAX_RATCHET_MESSAGE_BYTES) {
     return 'invalid or oversized ratchetMessage';
   }
-  // FIX (shared notepad): 'notePad' added to the allow-list.
-  //
-  // The server never interprets ciphertext — this array exists purely as a
-  // cheap shape check, the same reason 'image'/'video'/'file' are here. A
-  // notepad sync envelope is exactly as opaque to this server as a text
-  // message; it differs only in what the *client* does with the decrypted
-  // bytes (merge into a shared checklist instead of rendering a chat
-  // bubble — see MessagingService.handleIncoming's early-return branch for
-  // `.notePad` on the client).
-    const ALLOWED_CONTENT_TYPES = [
-      'text', 'image', 'video', 'file',
-      'notePad', 'receipt', 'profile', 'invite',
-    ];
-
-    if (!ALLOWED_CONTENT_TYPES.includes(body.contentType)) {
-      return 'invalid contentType';
-    }
+  if (!ALLOWED_CONTENT_TYPES.includes(body.contentType)) return 'invalid contentType';
   if (body.kind === 'handshake') {
     const h = body.handshake;
     if (!h || typeof h !== 'object') return 'missing handshake payload';
@@ -148,9 +129,6 @@ function validateEnvelope(body) {
   return null;
 }
 
-// Media: uploaded as raw bytes with a declared content-length cap. 25 MiB
-// matches a generous phone-camera photo; video should be chunked/streamed in
-// a production build (see README) rather than raised past this ceiling.
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
 
 module.exports = {
@@ -158,6 +136,7 @@ module.exports = {
   ED25519_KEY_BYTES,
   ED25519_SIGNATURE_BYTES,
   MAX_MEDIA_BYTES,
+  ALLOWED_CONTENT_TYPES,
   isValidUsername,
   isValidUserId,
   isValidUInt32,

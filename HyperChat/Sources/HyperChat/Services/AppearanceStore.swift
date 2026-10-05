@@ -1,35 +1,32 @@
 import SwiftUI
 import Combine
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import os
 
-/// Stores chat appearance per device.
-///
-/// Two scopes: a global default, and per-conversation overrides. A
-/// conversation with no override inherits the global one, so changing the
-/// global background doesn't silently strand conversations the user already
-/// customised.
+/// Stores appearance per device: a default for all chats, per-chat overrides,
+/// and the chats list. `UserDefaults`, because it's cosmetic and must be
+/// available before Face ID unlocks the storage key.
 @MainActor
 final class AppearanceStore: ObservableObject {
-
     @Published private(set) var globalAppearance: ChatAppearance = .default
     @Published private(set) var perConversation: [String: ChatAppearance] = [:]
+    @Published private(set) var listAppearance: ChatAppearance = .default
+
+    /// Average colour per background photo, for deriving bar colours.
+    private var averageColors: [String: RGB] = [:]
 
     private let defaults: UserDefaults
     private let logger = Logger(subsystem: "com.HyperChat", category: "appearance")
+    private let ciContext = CIContext(options: [.workingColorSpace: NSNull()])
 
     private enum Keys {
         static let global = "appearance.global"
         static let perConversation = "appearance.perConversation"
+        static let list = "appearance.list"
+        static let averages = "appearance.imageAverages"
     }
 
-    /// `UserDefaults`, not the encrypted database, on purpose.
-    ///
-    /// This is cosmetic, non-sensitive, and needed *before* the storage key is
-    /// unlocked — the chat list should render with the user's chosen colours
-    /// on launch rather than flashing the default and re-theming after Face ID.
-    /// The one thing that isn't stored here is the background *image*, which
-    /// goes in a protected directory (see `imageDirectory`), because a photo
-    /// the user chose is meaningfully more revealing than a hex colour.
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         load()
@@ -42,8 +39,33 @@ final class AppearanceStore: ObservableObject {
         return perConversation[conversationId] ?? globalAppearance
     }
 
+    func appearance(scope: AppearanceScope) -> ChatAppearance {
+        switch scope {
+        case .allChats: return globalAppearance
+        case .chatList: return listAppearance
+        case .conversation(let id): return appearance(for: id)
+        }
+    }
+
     func hasOverride(for conversationId: String) -> Bool {
         perConversation[conversationId] != nil
+    }
+
+    func hasOverride(scope: AppearanceScope) -> Bool {
+        switch scope {
+        case .allChats: return false
+        case .chatList: return listAppearance != .default
+        case .conversation(let id): return hasOverride(for: id)
+        }
+    }
+
+    /// Bar colours for an appearance, including photo backgrounds.
+    func chrome(for appearance: ChatAppearance) -> ChromeStyle {
+        var average: RGB?
+        if case .image(let fileName) = appearance.background {
+            average = averageColor(fileName: fileName)
+        }
+        return appearance.chrome(imageAverage: average)
     }
 
     // MARK: Writing
@@ -58,31 +80,43 @@ final class AppearanceStore: ObservableObject {
         persist()
     }
 
-    /// Drops a conversation's override so it follows the global setting again.
+    func set(_ appearance: ChatAppearance, scope: AppearanceScope) {
+        switch scope {
+        case .allChats: setGlobal(appearance)
+        case .chatList: listAppearance = appearance; persist()
+        case .conversation(let id): setAppearance(appearance, for: id)
+        }
+    }
+
     func clearOverride(for conversationId: String) {
         guard let removed = perConversation.removeValue(forKey: conversationId) else { return }
-        // Delete the backing image too, if this override owned one and no other
-        // appearance still references it — otherwise "reset to default" would
-        // leave the photo on disk forever.
-        if case .image(let fileName) = removed.background {
-            deleteImageIfUnreferenced(fileName)
-        }
         persist()
+        deleteImageIfUnreferenced(removed)
+    }
+
+    func clear(scope: AppearanceScope) {
+        switch scope {
+        case .allChats:
+            let removed = globalAppearance
+            globalAppearance = .default
+            persist()
+            deleteImageIfUnreferenced(removed)
+        case .chatList:
+            let removed = listAppearance
+            listAppearance = .default
+            persist()
+            deleteImageIfUnreferenced(removed)
+        case .conversation(let id):
+            clearOverride(for: id)
+        }
     }
 
     // MARK: Background images
 
-    /// Application Support, protected, and *not* the shared media cache — a
-    /// wallpaper is unrelated to message attachments and must not be swept by
-    /// `MediaCacheStore.prune()`, which would make backgrounds silently vanish
-    /// after 30 days.
     private var imageDirectory: URL {
         get throws {
             let base = try FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
+                for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
             )
             let dir = base.appendingPathComponent("chat-backgrounds", isDirectory: true)
             if !FileManager.default.fileExists(atPath: dir.path) {
@@ -100,25 +134,51 @@ final class AppearanceStore: ObservableObject {
         try? imageDirectory.appendingPathComponent(fileName)
     }
 
-    /// Saves a chosen photo and returns the filename to store in the appearance.
-    ///
-    /// Returns a *filename*, never an absolute path: iOS relocates the app
-    /// container between installs and OS updates, so a stored absolute path
-    /// resolves to nothing after an upgrade.
     func saveBackgroundImage(_ data: Data) throws -> String {
         let fileName = "\(UUID().uuidString).jpg"
         let url = try imageDirectory.appendingPathComponent(fileName)
         try data.write(to: url, options: .completeFileProtectionUntilFirstUserAuthentication)
+        _ = averageColor(fileName: fileName) // compute once, now
         return fileName
     }
 
-    private func deleteImageIfUnreferenced(_ fileName: String) {
-        let stillUsed = ([globalAppearance] + perConversation.values).contains { appearance in
-            if case .image(let other) = appearance.background { return other == fileName }
+    /// The photo's average colour, computed once with Core Image and cached.
+    func averageColor(fileName: String) -> RGB? {
+        if let cached = averageColors[fileName] { return cached }
+        guard let url = imageURL(fileName: fileName),
+              let image = CIImage(contentsOf: url) else { return nil }
+
+        let filter = CIFilter.areaAverage()
+        filter.inputImage = image
+        filter.extent = image.extent
+        guard let output = filter.outputImage else { return nil }
+
+        var pixel = [UInt8](repeating: 0, count: 4)
+        ciContext.render(
+            output,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: nil
+        )
+        let rgb = RGB(r: Double(pixel[0]) / 255, g: Double(pixel[1]) / 255, b: Double(pixel[2]) / 255)
+        averageColors[fileName] = rgb
+        if let data = try? JSONEncoder().encode(averageColors) {
+            defaults.set(data, forKey: Keys.averages)
+        }
+        return rgb
+    }
+
+    private func deleteImageIfUnreferenced(_ removed: ChatAppearance) {
+        guard case .image(let fileName) = removed.background else { return }
+        let stillUsed = ([globalAppearance, listAppearance] + perConversation.values).contains {
+            if case .image(let other) = $0.background { return other == fileName }
             return false
         }
         guard !stillUsed, let url = imageURL(fileName: fileName) else { return }
         try? FileManager.default.removeItem(at: url)
+        averageColors[fileName] = nil
     }
 
     // MARK: Persistence
@@ -128,6 +188,7 @@ final class AppearanceStore: ObservableObject {
             let encoder = JSONEncoder()
             defaults.set(try encoder.encode(globalAppearance), forKey: Keys.global)
             defaults.set(try encoder.encode(perConversation), forKey: Keys.perConversation)
+            defaults.set(try encoder.encode(listAppearance), forKey: Keys.list)
         } catch {
             logger.error("Couldn't persist appearance settings")
         }
@@ -142,6 +203,14 @@ final class AppearanceStore: ObservableObject {
         if let data = defaults.data(forKey: Keys.perConversation),
            let decoded = try? decoder.decode([String: ChatAppearance].self, from: data) {
             perConversation = decoded
+        }
+        if let data = defaults.data(forKey: Keys.list),
+           let decoded = try? decoder.decode(ChatAppearance.self, from: data) {
+            listAppearance = decoded
+        }
+        if let data = defaults.data(forKey: Keys.averages),
+           let decoded = try? decoder.decode([String: RGB].self, from: data) {
+            averageColors = decoded
         }
     }
 }

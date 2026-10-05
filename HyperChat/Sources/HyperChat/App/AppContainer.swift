@@ -3,8 +3,7 @@ import Combine
 import GRDB
 import os
 
-/// Hand-rolled dependency container. Created once at app launch and passed
-/// down via the environment. Construction order matters and is commented.
+/// Hand-rolled dependency container. Created once at app launch.
 @MainActor
 final class AppContainer: ObservableObject {
     let database: DatabaseManager
@@ -35,6 +34,10 @@ final class AppContainer: ObservableObject {
     let receiptService: ReceiptService
     let presenceService: PresenceService
     let profileService: ProfileService
+    let recoveryService: RecoveryService
+    /// NEW: APNs registration.
+    let pushService: PushService
+    let ntfyService: NtfyService
 
     private let logger = Logger(subsystem: "com.HyperChat", category: "container")
     private var cancellables = Set<AnyCancellable>()
@@ -71,6 +74,9 @@ final class AppContainer: ObservableObject {
             tokenStore: tokenStore
         )
 
+        self.pushService = PushService(apiClient: apiClient, authService: authService)
+        self.ntfyService = NtfyService(tokenStore: tokenStore, authService: authService)
+
         self.invitationService = InvitationService(
             conversationRepository: conversationRepository,
             userRepository: userRepository,
@@ -91,7 +97,11 @@ final class AppContainer: ObservableObject {
             apiClient: apiClient
         )
 
-        self.notePadService = NotePadService(repository: notePadRepository, authService: authService)
+        self.notePadService = NotePadService(
+            repository: notePadRepository,
+            conversationRepository: conversationRepository,
+            authService: authService
+        )
 
         self.alarmService = AlarmService(
             repository: alarmRepository,
@@ -130,16 +140,25 @@ final class AppContainer: ObservableObject {
             authService: authService
         )
 
-        // MARK: Send handlers (services that transmit through MessagingService)
+        self.recoveryService = RecoveryService(
+            api: RecoveryAPI(tokenStore: tokenStore),
+            database: database,
+            cryptoService: cryptoService,
+            authService: authService,
+            userRepository: userRepository,
+            conversationRepository: conversationRepository,
+            messageRepository: messageRepository,
+            notePadRepository: notePadRepository,
+            alarmRepository: alarmRepository,
+            messagingService: messagingService
+        )
+
+        // MARK: Send handlers
 
         notePadService.setSendHandler { [weak messagingService] operation, conversation in
             try await messagingService?.sendNotePadOperation(operation, in: conversation)
         }
 
-        // The alarm word is an ordinary chat message — but only to someone who
-        // accepted. Otherwise it would be silently queued and the alarm would
-        // stop as if the message had been delivered; throwing makes the alarm
-        // fall back to the arithmetic challenge instead.
         alarmService.setSendMessageHandler { [weak messagingService] word, conversation in
             guard let messagingService else { return }
             guard messagingService.relationshipState(of: conversation) == .accepted else {
@@ -158,15 +177,15 @@ final class AppContainer: ObservableObject {
             )
         }
 
-        // FIX (problem 5): invitations were never connected to the transport.
         invitationService.setSendHandler { [weak messagingService] payload, conversation in
             try await messagingService?.sendControlPayload(payload, kind: .invite, in: conversation)
         }
-        invitationService.setFlushHandler { [weak messagingService] conversation in
+        let notePadService = self.notePadService
+        invitationService.setFlushHandler { [weak messagingService, weak notePadService] conversation in
             await messagingService?.flushQueuedMessages(in: conversation)
+            await notePadService?.flushPending(in: conversation)
         }
 
-        // FIX (calls): call signalling was never connected either.
         callService.setSendHandler { [weak messagingService] signal, conversation in
             try await messagingService?.sendControlPayload(signal, kind: .call, in: conversation)
         }
@@ -182,26 +201,13 @@ final class AppContainer: ObservableObject {
                 receiptService?.acknowledgeDelivery(messageId: message.id, in: conversation)
             },
             receipt: { [weak receiptService] payload, conversation in
-                receiptService?.applyRemote(
-                    payload,
-                    conversationId: conversation.id,
-                    ownerUserId: conversation.ownerUserId
-                )
+                receiptService?.applyRemote(payload, conversationId: conversation.id, ownerUserId: conversation.ownerUserId)
             },
             profile: { [weak profileService] payload, conversation, senderId in
-                Task {
-                    await profileService?.applyRemote(
-                        payload, senderId: senderId, ownerUserId: conversation.ownerUserId
-                    )
-                }
+                Task { await profileService?.applyRemote(payload, senderId: senderId, ownerUserId: conversation.ownerUserId) }
             },
             invite: { [weak invitationService] payload, conversation, senderId in
-                invitationService?.applyRemote(
-                    payload,
-                    conversation: conversation,
-                    senderId: senderId,
-                    ownerUserId: conversation.ownerUserId
-                )
+                invitationService?.applyRemote(payload, conversation: conversation, senderId: senderId, ownerUserId: conversation.ownerUserId)
             },
             call: { [weak callService] signal, conversation, senderId in
                 Task { await callService?.handle(signal, from: senderId, conversation: conversation) }
@@ -211,6 +217,7 @@ final class AppContainer: ObservableObject {
         self.appLockService = AppLockService()
         self.accountDeletionService = AccountDeletionService(
             cryptoService: cryptoService,
+            apiClient: apiClient,
             conversationRepository: conversationRepository,
             messageRepository: messageRepository,
             sessionRepository: sessionRepository,
@@ -220,12 +227,24 @@ final class AppContainer: ObservableObject {
             alarmRepository: alarmRepository
         )
 
-        // MARK: Change forwarding
+        // MARK: Reconnect → catch up
         //
-        // `@EnvironmentObject` only reacts to the object it references directly.
-        // FIX: invitations, calls and Tenor weren't forwarded, so the
-        // Invitations list didn't update after accepting, the call screen never
-        // appeared, and GIF search results didn't render.
+        // FIX: after the socket comes back, fetch what was queued while it was
+        // down and send pad edits that couldn't go out. Skipped if a backfill
+        // is already running (two at once could process the same envelope
+        // concurrently).
+        webSocketService.setReconnectHandler { [weak self] in
+            Task { @MainActor in
+                guard let self, let userId = self.authService.currentUserId else { return }
+                if !self.messagingService.isSyncing {
+                    await self.messagingService.backfillPendingEnvelopes(myUserId: userId)
+                }
+                await self.notePadService.flushAllPending()
+            }
+        }
+
+        // MARK: Change forwarding
+
         let forwarded: [AnyPublisher<Void, Never>] = [
             authService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             messagingService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
@@ -239,13 +258,13 @@ final class AppContainer: ObservableObject {
             invitationService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             callService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             tenorService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+            recoveryService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+            ntfyService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
         ]
         Publishers.MergeMany(forwarded)
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
-        // A message from someone new may be a message request; refresh the
-        // Invitations list, presence contacts and profile sharing.
         messagingService.$incomingMessage
             .compactMap { $0?.conversationId }
             .sink { [weak self] conversationId in
@@ -256,8 +275,6 @@ final class AppContainer: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // An invitation accepted (either way) makes a new contact: start
-        // showing presence and send them our profile photo.
         invitationService.changes
             .sink { [weak self] conversationId in
                 guard let self else { return }
@@ -266,8 +283,12 @@ final class AppContainer: ObservableObject {
             }
             .store(in: &cancellables)
 
+        let pushService = self.pushService
         authService.setLogoutHandler { [weak self] departingUserId in
             guard let self else { return }
+            // Read now: the session token is cleared right after this handler.
+            pushService.unregister(bearer: tokenStore.currentToken)
+            self.ntfyService.signedOut(bearer: tokenStore.currentToken)
             Task { await self.callService.hangUp() }
             self.messagingService.stopListening()
             self.presenceService.stop()
@@ -281,13 +302,16 @@ final class AppContainer: ObservableObject {
             .sink { [weak self] userId in
                 guard let self else { return }
                 if userId != nil {
-                    self.logger.debug("Active account changed; starting listener")
-                    // Presence first: its stream must exist before the socket
-                    // connects, or the post-auth snapshot is dropped.
                     self.presenceService.start()
                     self.messagingService.startListening()
                     self.invitationService.reloadPending()
-                    Task { await self.alarmService.activate() }
+                    Task {
+                        await self.ntfyService.signedIn()
+                        await self.alarmService.activate()
+                        await self.pushService.register()
+                        await self.pushService.upload()
+                        await self.notePadService.flushAllPending()
+                    }
                 } else {
                     self.presenceService.stop()
                     self.messagingService.stopListening()
@@ -297,8 +321,6 @@ final class AppContainer: ObservableObject {
             .store(in: &cancellables)
 
         mediaEncryptionService.pruneCache()
-
-        logger.info("Backend mode: \(NetworkConfiguration.useMockBackend ? "mock" : "real", privacy: .public), base URL: \(NetworkConfiguration.baseURL.absoluteString, privacy: .public)")
     }
 
     static func bootstrap() -> AppContainer {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+require('dotenv').config({ path: './env.env' });
 
 const http = require('node:http');
 const path = require('node:path');
@@ -10,7 +11,13 @@ const { sendJson, sendError } = require('./src/json');
 const { makeLimiters } = require('./src/rateLimit');
 const { pruneExpiredSessions, resolveToken } = require('./src/auth');
 const { isWebSocketUpgrade, performHandshake, WebSocketConnection } = require('./src/ws');
+const recovery = require('./src/routes/recoveryRoutes');
+const account = require('./src/routes/accountRoutes');
+const { APNsClient, pushForEnvelope } = require('./src/apns');
 const { Presence } = require('./src/presence');
+const { Ntfy } = require('./src/ntfy');
+const ntfyRoutes = require('./src/routes/ntfyRoutes');
+
 
 const {
     registerRoute,
@@ -45,9 +52,34 @@ function main() {
   const presence = new Presence();
 
   const router = new Router();
+  const apns = APNsClient.fromEnv(); // null, ако не е настроено — всичко друго работи
+  const ntfy = new Ntfy(store);
   router.post('/auth/register', registerRoute(store, limiters));
   router.post('/auth/login/challenge', loginChallengeRoute(store, limiters));
   router.post('/auth/login', loginRoute(store, limiters));
+  
+  router.get('/account/email', recovery.getEmailRoute(store));
+  router.post('/account/email', recovery.setEmailRoute(store, limiters));
+  router.post('/account/email/verify', recovery.verifyEmailRoute(store, limiters));
+  router.post('/account/email/remove', recovery.removeEmailRoute(store));
+
+  router.post('/backup', recovery.uploadBackupRoute(store, limiters));
+  router.post('/backup/delete', recovery.deleteBackupRoute(store));
+
+  router.post('/recovery/start', recovery.startRecoveryRoute(store, limiters));
+  router.post('/recovery/verify', recovery.verifyRecoveryRoute(store, limiters));
+  router.get('/recovery/backup', recovery.downloadBackupRoute(store, limiters));
+  router.post('/recovery/rebind', recovery.rebindRoute(store, limiters));
+    
+  router.post('/account/delete/challenge', account.deleteChallengeRoute(store, limiters));
+  router.post('/account/delete', account.deleteAccountRoute(store, limiters, presence));
+
+  router.post('/devices/push-token', account.registerPushTokenRoute(store, limiters));
+  router.post('/devices/push-token/remove', account.removePushTokenRoute(store));
+    
+  router.get('/devices/ntfy', ntfyRoutes.getNtfyRoute(store, ntfy));
+  router.post('/devices/ntfy', ntfyRoutes.setNtfyRoute(store, limiters, ntfy));
+  router.post('/devices/ntfy/test', ntfyRoutes.testNtfyRoute(store, limiters, ntfy));
 
   router.post('/prekeys/one-time', replenishOneTimePreKeysRoute(store, limiters));
   router.post('/prekeys/signed', publishSignedPreKeyRoute(store, limiters));
@@ -57,7 +89,7 @@ function main() {
   router.get('/bundles/by-id/:userId', bundleByIdRoute(store, limiters));
   router.get('/bundles/by-username/:username', bundleByUsernameRoute(store, limiters));
 
-  router.post('/messages', sendMessageRoute(store, limiters, presence));
+  router.post('/messages', sendMessageRoute(store, limiters, presence, apns, ntfy));
   router.get('/messages/pending', fetchPendingRoute(store, limiters));
   router.get('/messages', fetchByConversationRoute(store, limiters));
   router.post('/messages/ack', acknowledgeRoute(store, limiters));

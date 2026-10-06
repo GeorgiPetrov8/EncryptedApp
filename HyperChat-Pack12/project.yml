@@ -1,0 +1,121 @@
+name: HyperChat
+options:
+  bundleIdPrefix: com.HyperChat
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    # NEW: GIF provider. Put your key from partner.klipy.com here
+    # (or in Xcode → Build Settings → User-Defined). Never commit a real key.
+    GIF_API_KEY: ""
+    GIF_API_HOST: "api.klipy.com"
+  configs:
+    Debug:
+      API_BASE_URL: "http://127.0.0.1:8080"
+      USE_MOCK_BACKEND: "NO"
+    Release:
+      API_BASE_URL: "https://chat.yourdomain.example"
+      USE_MOCK_BACKEND: "NO"
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift.git
+    from: 6.29.0
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    branch: latest
+targets:
+  HyperChat:
+    type: application
+    platform: iOS
+    sources:
+      - path: ../Sources/HyperChat
+        excludes:
+          - Info.plist
+          - "*.entitlements"
+    dependencies:
+      - package: GRDB
+        product: GRDB
+      - package: WebRTC
+        product: WebRTC
+      # NEW: embeds the screen-share extension in the app.
+      - target: HyperChatScreenShare
+        embed: true
+    info:
+      path: HyperChat/Sources/HyperChat/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: "HyperChat needs camera access to capture photos and videos to send in encrypted messages."
+        NSPhotoLibraryUsageDescription: "HyperChat needs photo library access to attach images and videos to encrypted messages."
+        # NEW: needed for "Save Image" / "Save Video" from the share sheet —
+        # without it iOS terminates the app on the first save.
+        NSPhotoLibraryAddUsageDescription: "HyperChat saves photos and videos you choose to your library."
+        NSMicrophoneUsageDescription: "HyperChat needs microphone access for calls and voice messages."
+        NSFaceIDUsageDescription: "HyperChat uses Face ID to protect access to your conversations."
+        API_BASE_URL: "$(API_BASE_URL)"
+        USE_MOCK_BACKEND: "$(USE_MOCK_BACKEND)"
+        GIF_API_KEY: "$(GIF_API_KEY)"
+        GIF_API_HOST: "$(GIF_API_HOST)"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIBackgroundModes:
+          - audio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.HyperChat.app
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        CODE_SIGN_ENTITLEMENTS: HyperChat/HyperChat.entitlements
+
+  # NEW: Broadcast Upload Extension for screen sharing.
+  HyperChatScreenShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ../Sources/HyperChatScreenShare
+      - path: ../Sources/HyperChat/Shared/ScreenShareWire.swift
+    info:
+      path: HyperChat/Sources/HyperChatScreenShare/Info.plist
+      properties:
+        CFBundleDisplayName: "HyperChat Screen Share"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).SampleHandler"
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    settings:
+      base:
+        # Must be <app bundle id>.HyperChatScreenShare — the app looks for it.
+        PRODUCT_BUNDLE_IDENTIFIER: com.HyperChat.app.HyperChatScreenShare
+
+  HyperChatTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ../../HyperChatTests
+    dependencies:
+      - target: HyperChat
+schemes:
+  HyperChat:
+    build:
+      targets:
+        HyperChat: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - HyperChatTests
+  HyperChat-Mock:
+    build:
+      targets:
+        HyperChat: all
+    run:
+      config: Debug
+      environmentVariables:
+        USE_MOCK_BACKEND: "YES"
+    test:
+      config: Debug
+      targets:
+        - HyperChatTests

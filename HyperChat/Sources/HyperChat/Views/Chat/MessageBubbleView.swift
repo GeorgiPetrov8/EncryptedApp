@@ -3,21 +3,25 @@ import SwiftUI
 struct MessageBubbleView: View {
     let message: DisplayMessage
     let peerIsVerified: Bool
+    /// Whether this user turned GIFs on (loads received GIFs automatically).
+    var allowGIFAutoload: Bool = false
+    var canReact: Bool = true
     var mediaLoader: (String) async -> Data? = { _ in nil }
     var onReply: () -> Void = {}
     var onEdit: () -> Void = {}
     var onDelete: () -> Void = {}
     var onQuoteTap: (String) -> Void = { _ in }
+    var onReact: (String?) -> Void = { _ in }
+    var onShare: () async -> Void = {}
+    var onPlayVideo: () async -> Void = {}
 
     @Environment(\.chatAppearance) private var appearance
 
     @State private var swipeOffset: CGFloat = 0
     @State private var swipeArmed = false
 
-    /// How far the bubble must be dragged to trigger a reply.
     private let replyThreshold: CGFloat = 60
-    /// Swipe toward the middle of the screen: right for their messages, left
-    /// for yours. Flip the sign here to make both swipe right instead.
+    /// Toward the middle of the screen: right for their messages, left for yours.
     private var swipeSign: CGFloat { message.isMine ? -1 : 1 }
 
     var body: some View {
@@ -27,15 +31,23 @@ struct MessageBubbleView: View {
             VStack(alignment: message.isMine ? .trailing : .leading, spacing: 4) {
                 bubble
                     .contextMenu { contextMenu }
+                if !message.reactions.isEmpty {
+                    ReactionBar(reactions: message.reactions) { reaction in
+                        onReact(reaction.includesMe ? nil : reaction.emoji)
+                    }
+                }
                 footer
             }
             .offset(x: swipeOffset)
-            .background(alignment: message.isMine ? .trailing : .leading) { replyHint }
 
             if !message.isMine { Spacer(minLength: 40) }
         }
-        // Simultaneous, so vertical scrolling still works; only a clearly
-        // horizontal drag moves the bubble.
+        // FIX (reply icon barely visible): the hint used to sit in the bubble's
+        // background, pushed 36 pt *outside* it — for incoming messages that
+        // is off the left edge of the screen, and its colours were derived
+        // from the chat background. It now sits in the gap the swipe opens up,
+        // on a material circle that's readable on any background.
+        .overlay(alignment: message.isMine ? .trailing : .leading) { replyHint }
         .simultaneousGesture(swipeToReply)
     }
 
@@ -65,20 +77,36 @@ struct MessageBubbleView: View {
     }
 
     private var replyHint: some View {
-        Image(systemName: "arrowshape.turn.up.left.fill")
-            .font(.footnote)
-            .foregroundStyle(appearance.foregroundColor)
-            .padding(8)
-            .background(Circle().fill(appearance.incomingBubbleColor))
-            .opacity(min(1, abs(swipeOffset) / replyThreshold))
-            .scaleEffect(swipeArmed ? 1.15 : 0.9)
-            .offset(x: message.isMine ? 36 : -36)
+        let progress = min(1, abs(swipeOffset) / replyThreshold)
+        return Image(systemName: "arrowshape.turn.up.left.fill")
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(swipeArmed ? Color.accentColor : Color.primary)
+            .frame(width: 34, height: 34)
+            .background(.regularMaterial, in: Circle())
+            .overlay(Circle().strokeBorder(Color.primary.opacity(0.15)))
+            .shadow(color: .black.opacity(0.25), radius: 4, y: 1)
+            .scaleEffect(swipeArmed ? 1.1 : 0.6 + 0.4 * progress)
+            .opacity(progress)
+            .padding(.horizontal, 4)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 
     // MARK: Long-press menu
 
     @ViewBuilder
     private var contextMenu: some View {
+        if canReact, message.status != .undecryptable {
+            ControlGroup {
+                ForEach(ReactionPayload.quickReactions, id: \.self) { emoji in
+                    Button(emoji) {
+                        onReact(message.myReaction == emoji ? nil : emoji)
+                    }
+                }
+            }
+            .controlGroupStyle(.palette)
+        }
+
         Button {
             onReply()
         } label: {
@@ -91,6 +119,13 @@ struct MessageBubbleView: View {
                 Label("Copy", systemImage: "doc.on.doc")
             }
         }
+        if message.isMediaAttachment {
+            Button {
+                Task { await onShare() }
+            } label: {
+                Label(saveLabel, systemImage: "square.and.arrow.down")
+            }
+        }
         if message.canEdit {
             Button {
                 onEdit()
@@ -98,10 +133,25 @@ struct MessageBubbleView: View {
                 Label("Edit", systemImage: "pencil")
             }
         }
+        if message.myReaction != nil {
+            Button {
+                onReact(nil)
+            } label: {
+                Label("Remove reaction", systemImage: "face.dashed")
+            }
+        }
         Button(role: .destructive) {
             onDelete()
         } label: {
             Label("Delete for me", systemImage: "trash")
+        }
+    }
+
+    private var saveLabel: String {
+        switch message.contentType {
+        case .image: return "Save / Share Photo"
+        case .video: return "Save / Share Video"
+        default: return "Save / Share File"
         }
     }
 
@@ -148,8 +198,21 @@ struct MessageBubbleView: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(.orange, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 )
+        } else if let gif = message.gif {
+            VStack(alignment: .leading, spacing: 6) {
+                if let reply = message.replyTo {
+                    ReplyQuoteView(reply: reply, authorName: message.replyAuthorName ?? "", textColor: textColor)
+                        .onTapGesture { onQuoteTap(reply.messageId) }
+                        .padding([.horizontal, .top], 6)
+                }
+                GIFMessageView(gif: gif, autoload: allowGIFAutoload)
+            }
+            .background(message.replyTo == nil ? Color.clear : bubbleColor)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         } else if message.contentType == .image {
             MediaMessageView(messageId: message.id, mediaLoader: mediaLoader)
+        } else if message.contentType == .video {
+            VideoMessageView(onPlay: onPlayVideo)
         } else if message.contentType == .file, message.mediaType == .audio {
             VoiceMessageBubble(
                 duration: message.voiceDuration ?? 0,
@@ -159,6 +222,13 @@ struct MessageBubbleView: View {
             )
             .background(bubbleColor)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        } else if message.contentType == .file {
+            FileMessageView(
+                title: "Document",
+                textColor: textColor,
+                bubbleColor: bubbleColor,
+                onOpen: onShare
+            )
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 if let reply = message.replyTo {
@@ -169,13 +239,7 @@ struct MessageBubbleView: View {
                     )
                     .onTapGesture { onQuoteTap(reply.messageId) }
                 }
-                HStack(spacing: 6) {
-                    if let icon = mediaIcon {
-                        Image(systemName: icon)
-                            .font(.footnote)
-                    }
-                    Text(message.text)
-                }
+                Text(message.text)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -191,14 +255,6 @@ struct MessageBubbleView: View {
 
     private var textColor: Color {
         message.isMine ? Color.white : appearance.foregroundColor
-    }
-
-    private var mediaIcon: String? {
-        switch message.contentType {
-        case .text, .image: return nil
-        case .video: return "video"
-        case .file: return message.mediaType == .audio ? nil : "paperclip"
-        }
     }
 
     private var lockIcon: String {

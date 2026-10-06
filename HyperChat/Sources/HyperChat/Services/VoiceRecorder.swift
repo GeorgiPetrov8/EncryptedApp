@@ -4,11 +4,6 @@ import Combine
 import os
 
 /// Records voice messages: AAC/m4a, mono, 24 kHz, 32 kbps (~240 KB per minute).
-///
-/// Two ways to record:
-///   - hold the mic and release to send (quick messages);
-///   - tap the mic (or slide up while holding) to **lock**: recording continues
-///     hands-free with delete, pause/resume and an explicit Send button.
 @MainActor
 final class VoiceRecorder: NSObject, ObservableObject {
 
@@ -18,6 +13,14 @@ final class VoiceRecorder: NSObject, ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var level: Float = 0
 
+    /// FIX (waveform froze in silence): the last 24 levels, republished on
+    /// every 50 ms tick. The old view only redrew when `level` *changed* —
+    /// in silence the level stays at 0, so nothing changed and the bars froze
+    /// until a sound arrived. A new array every tick keeps them moving.
+    @Published private(set) var recentLevels: [Float] = Array(repeating: 0, count: VoiceRecorder.visibleBars)
+
+    static let visibleBars = 24
+
     private var recorder: AVAudioRecorder?
     private var timer: Timer?
     private var fileURL: URL?
@@ -25,7 +28,6 @@ final class VoiceRecorder: NSObject, ObservableObject {
     private let logger = Logger(subsystem: "com.HyperChat", category: "voice")
 
     static let maxDuration: TimeInterval = 5 * 60
-    /// Shorter than this is a mis-tap, not a message.
     static let minDuration: TimeInterval = 0.6
 
     // MARK: Permission
@@ -62,13 +64,12 @@ final class VoiceRecorder: NSObject, ObservableObject {
 
         let recorder = try AVAudioRecorder(url: url, settings: settings)
         recorder.isMeteringEnabled = true
-        // Plain `record()` (not `record(forDuration:)`) so pause/resume works;
-        // the 5-minute cap is enforced in `updateMetering`.
         guard recorder.record() else { throw VoiceRecorderError.couldNotStart }
 
         self.recorder = recorder
         self.fileURL = url
         capturedWaveform = []
+        recentLevels = Array(repeating: 0, count: Self.visibleBars)
         duration = 0
         isPaused = false
         isLocked = false
@@ -76,7 +77,6 @@ final class VoiceRecorder: NSObject, ObservableObject {
         startMetering()
     }
 
-    /// Hands-free mode: keeps recording after the finger lifts.
     func lock() {
         guard isRecording else { return }
         isLocked = true
@@ -96,20 +96,15 @@ final class VoiceRecorder: NSObject, ObservableObject {
         isPaused = false
     }
 
-    /// Stops and returns the recording, or `nil` if it was too short.
     func stop() -> RecordedVoiceMessage? {
         guard let recorder, isRecording else { return nil }
 
-        // `currentTime` is only meaningful while actively recording, so a
-        // paused recording uses the duration captured at pause time.
         let recordedDuration = isPaused ? duration : max(duration, recorder.currentTime)
         recorder.stop()
         finishSession()
 
         guard let url = fileURL else { return nil }
         defer {
-            // The temporary directory has no file-protection class: keep the
-            // unencrypted recording on disk for as little time as possible.
             try? FileManager.default.removeItem(at: url)
             fileURL = nil
         }
@@ -159,8 +154,11 @@ final class VoiceRecorder: NSObject, ObservableObject {
         level = normalised
         capturedWaveform.append(normalised)
 
-        // At the cap: pause rather than stop, and lock, so the user still gets
-        // to hit Send instead of the recording silently disappearing.
+        var levels = recentLevels
+        levels.removeFirst()
+        levels.append(normalised)
+        recentLevels = levels
+
         if duration >= Self.maxDuration {
             pause()
             isLocked = true

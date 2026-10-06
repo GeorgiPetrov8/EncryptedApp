@@ -184,11 +184,7 @@ struct CallView: View {
                     .accessibilityLabel(service.isVideoEnabled ? "Turn off camera" : "Turn on camera")
                 }
 
-                controlButton(
-                    icon: "rectangle.inset.filled.on.rectangle",
-                    active: service.isScreenSharing
-                ) { Task { await service.toggleScreenShare() } }
-                .accessibilityLabel(service.isScreenSharing ? "Stop sharing screen" : "Share screen")
+                ScreenShareButton(service: service)
 
                 Button {
                     Task { await service.hangUp() }

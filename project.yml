@@ -7,6 +7,10 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
+    # NEW: GIF provider. Put your key from partner.klipy.com here
+    # (or in Xcode → Build Settings → User-Defined). Never commit a real key.
+    GIF_API_KEY: ""
+    GIF_API_HOST: "api.klipy.com"
   configs:
     Debug:
       API_BASE_URL: "http://127.0.0.1:8080"
@@ -26,7 +30,7 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: ../Sources/HyperChat
+      - path: HyperChat/Sources/HyperChat
         excludes:
           - Info.plist
           - "*.entitlements"
@@ -35,6 +39,9 @@ targets:
         product: GRDB
       - package: WebRTC
         product: WebRTC
+      # NEW: embeds the screen-share extension in the app.
+      - target: HyperChatScreenShare
+        embed: true
     info:
       path: HyperChat/Sources/HyperChat/Info.plist
       properties:
@@ -43,26 +50,18 @@ targets:
           - UIInterfaceOrientationPortrait
         NSCameraUsageDescription: "HyperChat needs camera access to capture photos and videos to send in encrypted messages."
         NSPhotoLibraryUsageDescription: "HyperChat needs photo library access to attach images and videos to encrypted messages."
-        NSMicrophoneUsageDescription: "HyperChat needs microphone access to record voice messages."
+        # NEW: needed for "Save Image" / "Save Video" from the share sheet —
+        # without it iOS terminates the app on the first save.
+        NSPhotoLibraryAddUsageDescription: "HyperChat saves photos and videos you choose to your library."
+        NSMicrophoneUsageDescription: "HyperChat needs microphone access for calls and voice messages."
         NSFaceIDUsageDescription: "HyperChat uses Face ID to protect access to your conversations."
+        NSPhotoLibraryAddUsageDescription: "HyperChat saves photos and videos you choose to your library."
         API_BASE_URL: "$(API_BASE_URL)"
         USE_MOCK_BACKEND: "$(USE_MOCK_BACKEND)"
+        GIF_API_KEY: "$(GIF_API_KEY)"
+        GIF_API_HOST: "$(GIF_API_HOST)"
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
-        # FIX (alarm): keeps the alarm sound playing when the app is
-        # backgrounded mid-challenge.
-        #
-        # Without this, swiping up to the home screen silences the alarm
-        # instantly — a bypass requiring no thought at all, which would make
-        # the whole "can't dismiss without solving something" premise
-        # decorative. With it, the audio session survives backgrounding and
-        # the user has to come back and finish.
-        #
-        # Note for App Review: this is a legitimate use of the audio
-        # background mode (an alarm clock is one of Apple's own listed
-        # examples), but be ready to explain it — background audio is
-        # scrutinised, and "it's an alarm" needs to be evident from the UI,
-        # which `AlarmRingingView` makes it.
         UIBackgroundModes:
           - audio
     settings:
@@ -70,11 +69,37 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.HyperChat.app
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         CODE_SIGN_ENTITLEMENTS: HyperChat/HyperChat.entitlements
+
+  # NEW: Broadcast Upload Extension for screen sharing.
+  HyperChatScreenShare:
+    type: app-extension
+    platform: iOS
+
+    sources:
+      - path: HyperChat/Sources/HyperChatScreenShare
+        excludes:
+          - Info.plist
+          - "*.entitlements"
+      - path: HyperChat/Sources/HyperChat/Shared/ScreenShareWire.swift
+
+    info:
+      path: HyperChat/Sources/HyperChatScreenShare/Info.plist
+      properties:
+        CFBundleDisplayName: "HyperChat Screen Share"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).SampleHandler"
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.HyperChat.app.HyperChatScreenShare
+
   HyperChatTests:
     type: bundle.unit-test
     platform: iOS
     sources:
-      - path: ../../HyperChatTests
+      - path: HyperChatTests
     dependencies:
       - target: HyperChat
 schemes:

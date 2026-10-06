@@ -114,6 +114,7 @@ final class DatabaseManager {
         "v8_alarms",
         "v9_receipts_presence_invites",
         "v10_message_edits",
+        "v11_message_reactions",
     ]
     #endif
 
@@ -453,12 +454,36 @@ final class DatabaseManager {
             )
         }
 
-        /// Message editing. Replies need no column: the quote travels inside the
-        /// encrypted `TextPayload`.
         migrator.registerMigration("v10_message_edits") { db in
             try db.alter(table: "messages") { t in
                 t.add(column: "editedAt", .datetime)
             }
+        }
+
+        /// NEW: emoji reactions. One row per (message, person); removing a
+        /// reaction keeps a tombstone (empty emoji). Deleting a message — or
+        /// the whole account — removes its reactions via the cascade.
+        migrator.registerMigration("v11_message_reactions") { db in
+            try db.create(table: "message_reactions") { t in
+                t.column("ownerUserId", .text).notNull()
+                t.column("conversationId", .text).notNull()
+                t.column("messageId", .text).notNull()
+                t.column("reactorId", .text).notNull()
+                t.column("emoji", .text).notNull()
+                t.column("updatedAt", .datetime).notNull()
+                t.primaryKey(["ownerUserId", "messageId", "reactorId"])
+                t.foreignKey(
+                    ["ownerUserId", "messageId"],
+                    references: "messages",
+                    columns: ["ownerUserId", "id"],
+                    onDelete: .cascade
+                )
+            }
+            try db.create(
+                index: "idx_reactions_owner_conversation",
+                on: "message_reactions",
+                columns: ["ownerUserId", "conversationId"]
+            )
         }
 
         return migrator

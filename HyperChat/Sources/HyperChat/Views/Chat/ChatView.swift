@@ -8,6 +8,7 @@ struct ChatView: View {
     @ObservedObject private var appearanceStore: AppearanceStore
     @ObservedObject private var presenceService: PresenceService
     @ObservedObject private var profileService: ProfileService
+    @ObservedObject private var gifService: GIFService
 
     @Environment(\.dismiss) private var dismiss
 
@@ -15,6 +16,7 @@ struct ChatView: View {
     @State private var showNotePad = false
     @State private var showAppearanceSettings = false
     @State private var showCameraPicker = false
+    @State private var showPhotoPicker = false
     @State private var showDocumentPicker = false
     @State private var showGIFPicker = false
 
@@ -23,6 +25,7 @@ struct ChatView: View {
         _appearanceStore = ObservedObject(wrappedValue: container.appearanceStore)
         _presenceService = ObservedObject(wrappedValue: container.presenceService)
         _profileService = ObservedObject(wrappedValue: container.profileService)
+        _gifService = ObservedObject(wrappedValue: container.tenorService)
         _viewModel = StateObject(
             wrappedValue: ChatViewModel(
                 conversation: conversation,
@@ -40,15 +43,22 @@ struct ChatView: View {
 
     var body: some View {
         messageList
-            // Floating bars: messages scroll underneath both.
             .safeAreaInset(edge: .top, spacing: 0) { topBar }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
             .background { chatBackground }
             .environment(\.chatAppearance, appearance)
             .environment(\.chromeStyle, chrome)
-            // The header notch replaces the navigation bar. Swipe-back keeps
-            // working thanks to `NavigationSwipeBack.swift`.
+            // The chats list tints the whole navigation stack with its bar
+            // colour; inside a chat the normal accent colour applies (the
+            // notches set their own).
+            .tint(.accentColor)
             .toolbar(.hidden, for: .navigationBar)
+            // FIX: the photo picker lives here, not inside the attachment Menu.
+            .photosPicker(
+                isPresented: $showPhotoPicker,
+                selection: $viewModel.selectedPhotoItem,
+                matching: .any(of: [.images, .videos])
+            )
             .sheet(isPresented: $showVerifyIdentity, onDismiss: { viewModel.reloadPeer() }) {
                 verifyIdentitySheet
             }
@@ -78,10 +88,23 @@ struct ChatView: View {
                 )
             }
             .sheet(isPresented: $showGIFPicker) {
-                GIFPickerView { data in
-                    Task { await viewModel.sendGIF(data) }
+                GIFPickerView { gif in
+                    Task { await viewModel.sendGIF(gif) }
                 }
                 .environmentObject(container)
+            }
+            // NEW: save / share a decrypted attachment.
+            .sheet(item: $viewModel.sharedFile) { file in
+                ActivityView(url: file.url) {
+                    viewModel.finishedWith(file)
+                }
+                .presentationDetents([.medium, .large])
+            }
+            // NEW: play a video.
+            .fullScreenCover(item: $viewModel.playingVideo) { file in
+                VideoPlayerScreen(url: file.url) {
+                    viewModel.finishedWith(file)
+                }
             }
             .onAppear {
                 viewModel.reloadConversation()
@@ -163,8 +186,6 @@ struct ChatView: View {
             ) {
                 Button("Accept") { Task { await viewModel.acceptInvitation() } }
                     .buttonStyle(.borderedProminent)
-                    // Explicit tint: inside a notch the tint is the text colour,
-                    // and a prominent button filled with it would hide its label.
                     .tint(.accentColor)
                 Button("Decline", role: .destructive) { Task { await viewModel.declineInvitation() } }
                     .buttonStyle(.bordered)
@@ -205,19 +226,26 @@ struct ChatView: View {
                         MessageBubbleView(
                             message: message,
                             peerIsVerified: viewModel.peerIsVerified,
+                            allowGIFAutoload: gifService.isEnabled,
+                            canReact: viewModel.canCompose,
                             mediaLoader: { await viewModel.loadMediaData(forMessageId: $0) },
                             onReply: { viewModel.startReply(to: message) },
                             onEdit: { viewModel.startEdit(message) },
                             onDelete: { viewModel.deleteForMe(message) },
                             onQuoteTap: { id in
                                 withAnimation { proxy.scrollTo(id, anchor: .center) }
-                            }
+                            },
+                            onReact: { emoji in viewModel.react(to: message, emoji: emoji) },
+                            onShare: { await viewModel.shareMedia(messageId: message.id) },
+                            onPlayVideo: { await viewModel.playVideo(messageId: message.id) }
                         )
                         .id(message.id)
                     }
                 }
                 .padding(.horizontal)
-                .padding(.vertical, 8)
+                // A little more room under the header notch.
+                .padding(.top, 14)
+                .padding(.bottom, 8)
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: viewModel.messages.count) { _, _ in
@@ -237,7 +265,6 @@ struct ChatView: View {
                 composerContext
                 MessageInputBar(
                     text: $viewModel.draftText,
-                    selectedPhotoItem: $viewModel.selectedPhotoItem,
                     isSending: viewModel.isSending,
                     isSendingMedia: viewModel.isSendingMedia,
                     disabledReason: viewModel.composeDisabledReason,
@@ -245,6 +272,7 @@ struct ChatView: View {
                     focusRequest: viewModel.focusRequest,
                     onSend: { Task { await viewModel.send() } },
                     onCamera: { showCameraPicker = true },
+                    onPhotoLibrary: { showPhotoPicker = true },
                     onDocument: { showDocumentPicker = true },
                     onGIF: { showGIFPicker = true },
                     onVoiceFinished: { voiceMessage in
@@ -258,7 +286,6 @@ struct ChatView: View {
         .padding(.bottom, 6)
     }
 
-    /// "Replying to …" / "Edit message" strip above the text field.
     @ViewBuilder
     private var composerContext: some View {
         if let reply = viewModel.replyingTo {
@@ -392,8 +419,6 @@ private struct ChatHeaderNotch: View {
                     }
                 }
                 if isOnline {
-                    // Same colour as the name, smaller and lighter — the
-                    // contrast rule doesn't allow a faded secondary colour.
                     Text("online")
                         .font(.caption2.weight(.medium))
                 }
@@ -574,7 +599,6 @@ private struct IdentityChangedBanner: View {
 
 private struct MessageInputBar: View {
     @Binding var text: String
-    @Binding var selectedPhotoItem: PhotosPickerItem?
 
     @StateObject private var voiceRecorder = VoiceRecorder()
     @FocusState private var isFocused: Bool
@@ -586,6 +610,7 @@ private struct MessageInputBar: View {
     let focusRequest: Int
     let onSend: () -> Void
     let onCamera: () -> Void
+    let onPhotoLibrary: () -> Void
     let onDocument: () -> Void
     let onGIF: () -> Void
     let onVoiceFinished: (RecordedVoiceMessage) -> Void
@@ -622,9 +647,9 @@ private struct MessageInputBar: View {
                         .frame(maxWidth: .infinity)
                 } else {
                     AttachmentMenu(
-                        selectedPhotoItem: $selectedPhotoItem,
                         isDisabled: isDisabled || isSendingMedia || isEditing,
                         onCamera: onCamera,
+                        onPhotoLibrary: onPhotoLibrary,
                         onDocument: onDocument,
                         onGIF: onGIF
                     )
@@ -635,8 +660,6 @@ private struct MessageInputBar: View {
                         .disabled(isDisabled)
                 }
 
-                // The mic stays in the hierarchy for the whole press — see
-                // `VoiceRecordButton` for why that matters.
                 if hasText || isEditing {
                     Button(action: onSend) {
                         if isSending {

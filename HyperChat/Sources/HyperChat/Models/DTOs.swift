@@ -71,8 +71,9 @@ enum EnvelopePayloadKind: String, Codable, Equatable {
     case profile
     case invite
     case call
-    /// An `EditPayload` — new text for a message the sender already sent.
     case edit
+    /// NEW: a `ReactionPayload` — an emoji reaction to a message.
+    case reaction
 
     var asMessageContentType: MessageContentType? {
         switch self {
@@ -80,7 +81,7 @@ enum EnvelopePayloadKind: String, Codable, Equatable {
         case .image: return .image
         case .video: return .video
         case .file: return .file
-        case .notePad, .receipt, .profile, .invite, .call, .edit: return nil
+        case .notePad, .receipt, .profile, .invite, .call, .edit, .reaction: return nil
         }
     }
 

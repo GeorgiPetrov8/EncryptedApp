@@ -12,6 +12,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             profileSection
+            notificationsSection
             accountSection
             appearanceSection
             privacySection
@@ -27,6 +28,7 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .appScreenStyle()
         .sheet(item: $appearanceScope) { scope in
             AppearanceSettingsView(scope: scope)
                 .environmentObject(container)
@@ -51,7 +53,6 @@ struct SettingsView: View {
             Button("Delete from this device only", role: .destructive) {
                 deleteAccount(includeServer: false)
             }
-
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Your account will stay on the server, and your username stays taken. Try again when you're online to remove it completely.")
@@ -101,17 +102,36 @@ struct SettingsView: View {
         return container.profileService.myAvatarData()
     }
 
+    // MARK: Notifications
+    //
+    // Its own section near the top: it used to be a row inside "Account",
+    // where it was easy to miss.
+
+    private var notificationsSection: some View {
+        Section {
+            NavigationLink {
+                NotificationSettingsView()
+            } label: {
+                HStack {
+                    Label("Notifications (ntfy)", systemImage: "bell.badge")
+                    Spacer()
+                    Text(container.ntfyService.isEnabled ? "On" : "Off")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text("Get a “New message” notification when HyperChat is closed, through the free ntfy app.")
+        }
+    }
+
     // MARK: Account
 
     private var accountSection: some View {
         Section("Account") {
             if let username = container.authService.currentUsername {
                 LabeledContent("Username", value: username)
-            }
-            NavigationLink {
-                NotificationSettingsView()
-            } label: {
-                Label("Notifications", systemImage: "bell")
             }
             NavigationLink {
                 RecoverySettingsView()
@@ -140,7 +160,7 @@ struct SettingsView: View {
             Button {
                 appearanceScope = .chatList
             } label: {
-                Label("Chats list background", systemImage: "list.bullet.rectangle")
+                Label("App background", systemImage: "list.bullet.rectangle")
             }
             Button {
                 appearanceScope = .allChats
@@ -150,7 +170,7 @@ struct SettingsView: View {
         } header: {
             Text("Appearance")
         } footer: {
-            Text("“Chat background” applies to every chat without its own. Set one for a single chat from the ⋯ menu inside it.")
+            Text("“App background” is used on every screen outside a chat. “Chat background” applies to every chat without its own; set one for a single chat from the ⋯ menu inside it.")
         }
     }
 
@@ -166,14 +186,18 @@ struct SettingsView: View {
                 get: { container.receiptService.sendsReadReceipts },
                 set: { container.receiptService.sendsReadReceipts = $0 }
             ))
+            Toggle("GIFs (\(container.tenorService.providerName))", isOn: Binding(
+                get: { container.tenorService.isEnabled },
+                set: { container.tenorService.isEnabled = $0 }
+            ))
         } header: {
             Text("Privacy")
         } footer: {
-            Text("Online status is only shown to people you chat with, and never as a “last seen” time. Turning read receipts off also hides other people's read receipts from you.")
+            Text("Online status is only shown to people you chat with, never as a “last seen” time. Turning read receipts off also hides other people's. GIFs: searching and loading GIFs contacts \(container.tenorService.providerName), which sees your IP address; when off, received GIFs only load when you tap them.")
         }
     }
 
-    // MARK: Unchanged sections
+    // MARK: Other sections
 
     private var alarmsSection: some View {
         Section {

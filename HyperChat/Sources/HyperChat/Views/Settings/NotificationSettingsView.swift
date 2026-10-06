@@ -77,6 +77,7 @@ struct NotificationSettingsView: View {
             }
         }
         .navigationTitle("Notifications")
+        .appScreenStyle()
         .disabled(service.isBusy)
         .confirmationDialog("Generate a new topic?", isPresented: $confirmRegenerate, titleVisibility: .visible) {
             Button("Generate", role: .destructive) { perform { try await service.regenerate() } }

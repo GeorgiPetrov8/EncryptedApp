@@ -8,10 +8,6 @@ import WebRTC
 #endif
 
 /// Orchestrates calls: signalling over the encrypted channel, media over WebRTC.
-///
-/// Needs the `stasel/WebRTC` Swift package. Guarded by `#if canImport(WebRTC)`
-/// so the project still builds without it — the call buttons then say calling
-/// isn't available.
 @MainActor
 final class CallService: NSObject, ObservableObject {
 
@@ -24,16 +20,10 @@ final class CallService: NSObject, ObservableObject {
     @Published private(set) var remoteIsVideoEnabled = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var connectedAt: Date?
-    /// FIX: published so `CallView` can show who's calling.
     @Published private(set) var activePeerId: String?
-    /// Whether this call was started as a video call. Video can't be added to
-    /// an audio call mid-way (that needs SDP renegotiation, not implemented).
     @Published private(set) var isVideoCall = false
 
     #if canImport(WebRTC)
-    /// FIX: the tracks are exposed so the video views can actually render
-    /// them. The previous `RTCVideoView` was never attached to any track, so
-    /// video calls showed a black screen on both sides.
     @Published private(set) var localVideoTrack: RTCVideoTrack?
     @Published private(set) var remoteVideoTrack: RTCVideoTrack?
     #endif
@@ -50,10 +40,17 @@ final class CallService: NSObject, ObservableObject {
     private var connectTimeoutTask: Task<Void, Never>?
     private var pendingRemoteCandidates: [IceCandidate] = []
 
+    /// NEW: screen frames from the broadcast extension.
+    private let screenReceiver = ScreenShareReceiver()
+
     #if canImport(WebRTC)
     private var peerConnection: RTCPeerConnection?
     private var localAudioTrack: RTCAudioTrack?
     private var videoCapturer: RTCCameraVideoCapturer?
+    /// Kept so screen frames can be fed into the same video track as the
+    /// camera — no renegotiation needed to switch between them.
+    private var localVideoSource: RTCVideoSource?
+    private var screenCapturer: RTCVideoCapturer?
 
     private static let factory: RTCPeerConnectionFactory = {
         RTCInitializeSSL()
@@ -87,7 +84,6 @@ final class CallService: NSObject, ObservableObject {
         #endif
     }
 
-    /// Returns and clears the last error, for callers that show it themselves.
     func consumeError() -> String? {
         defer { errorMessage = nil }
         return errorMessage
@@ -115,8 +111,6 @@ final class CallService: NSObject, ObservableObject {
         guard let myUserId = authService.currentUserId,
               let peerId = conversation.otherParticipant(myUserId: myUserId) else { return }
 
-        // FIX: re-enabled. Calling someone who hasn't accepted an invitation
-        // would bypass the gate the invitation feature exists to provide.
         let fresh = (try? conversationRepository.fetch(id: conversation.id, ownerUserId: myUserId)) ?? conversation
         guard fresh.relationshipState.allowsSending else {
             errorMessage = "You can call someone once they've accepted your invitation."
@@ -172,9 +166,6 @@ final class CallService: NSObject, ObservableObject {
             return
         }
 
-        // FIX: the ring timeout used to keep running after answering. If ICE
-        // took longer than the remaining ring time, an answered call was hung
-        // up as "unanswered". Now ringing stops and a connect timeout starts.
         ringTimeoutTask?.cancel()
         phase = .connecting(callId: callId)
         isVideoCall = isVideo
@@ -208,8 +199,6 @@ final class CallService: NSObject, ObservableObject {
 
     func hangUp() async {
         guard phase.isBusy else { return }
-        // Cancelling our own unanswered call is "hang up" from our side; the
-        // other side shows it as a missed call.
         await endCall(reason: .hangUp)
     }
 
@@ -228,11 +217,6 @@ final class CallService: NSObject, ObservableObject {
         try? AVAudioSession.sharedInstance().overrideOutputAudioPort(isSpeakerOn ? .speaker : .none)
     }
 
-    /// Turns the camera off/on *within* a video call.
-    ///
-    /// FIX: on an audio call there is no video track, so this used to flip the
-    /// "camera on" flag while nothing was being sent. Adding video to an audio
-    /// call needs renegotiation; until that exists the UI hides the button.
     func toggleVideo() async {
         #if canImport(WebRTC)
         guard isVideoCall, let track = localVideoTrack else {
@@ -240,22 +224,77 @@ final class CallService: NSObject, ObservableObject {
             return
         }
         isVideoEnabled.toggle()
-        track.isEnabled = isVideoEnabled
-        if isVideoEnabled { startCameraCapture() } else { await stopCameraCapture() }
+        // While the screen is being shared the track carries the screen, so it
+        // stays on; the camera setting applies again when sharing stops.
+        if !isScreenSharing {
+            track.isEnabled = isVideoEnabled
+            if isVideoEnabled { startCameraCapture() } else { await stopCameraCapture() }
+        }
         await broadcastState()
         #endif
     }
 
-    /// Screen sharing needs a Broadcast Upload Extension target — iOS doesn't
-    /// let an app capture the screen from its own process. Until that target
-    /// exists this reports the reason instead of silently doing nothing.
-    func toggleScreenShare() async {
-        guard ScreenShareCoordinator.isExtensionConfigured else {
-            errorMessage = "Screen sharing needs the broadcast extension, which isn't set up in this build."
-            return
+    // MARK: Screen sharing
+
+    /// Why screen sharing can't start right now, or nil if it can.
+    var screenShareUnavailableReason: String? {
+        if !isAvailable { return "Calling isn't available in this build." }
+        if !ScreenShareCoordinator.isExtensionConfigured {
+            return "Screen sharing needs the HyperChat Screen Share extension, which isn't in this build."
         }
-        isScreenSharing.toggle()
+        if !isVideoCall { return "Screen sharing works in video calls. Start a video call to share your screen." }
+        return nil
+    }
+
+    /// The broadcast itself is started from the system picker (see
+    /// `ScreenShareButton`); this only reports why it can't be used.
+    func toggleScreenShare() async {
+        if let reason = screenShareUnavailableReason { errorMessage = reason }
+    }
+
+    #if canImport(WebRTC)
+    private func startScreenShareListener() {
+        guard ScreenShareCoordinator.isExtensionConfigured,
+              let source = localVideoSource else { return }
+        let capturer = RTCVideoCapturer(delegate: source)
+        screenCapturer = capturer
+
+        screenReceiver.start(
+            onFrame: { pixelBuffer, degrees, timestamp in
+                let rotation: RTCVideoRotation
+                switch degrees {
+                case 90: rotation = ._90
+                case 180: rotation = ._180
+                case 270: rotation = ._270
+                default: rotation = ._0
+                }
+                let frame = RTCVideoFrame(
+                    buffer: RTCCVPixelBuffer(pixelBuffer: pixelBuffer),
+                    rotation: rotation,
+                    timeStampNs: timestamp
+                )
+                source.capturer(capturer, didCapture: frame)
+            },
+            onState: { [weak self] sharing in
+                Task { @MainActor in await self?.screenShareStateChanged(sharing) }
+            }
+        )
+    }
+    #endif
+
+    private func screenShareStateChanged(_ sharing: Bool) async {
+        #if canImport(WebRTC)
+        guard isVideoCall, sharing != isScreenSharing else { return }
+        isScreenSharing = sharing
+        if sharing {
+            await stopCameraCapture()
+            localVideoTrack?.isEnabled = true
+        } else {
+            localVideoTrack?.isEnabled = isVideoEnabled
+            if isVideoEnabled { startCameraCapture() }
+        }
         await broadcastState()
+        #endif
     }
 
     private func broadcastState() async {
@@ -264,7 +303,7 @@ final class CallService: NSObject, ObservableObject {
             .update(CallStateUpdate(
                 callId: callId,
                 isAudioMuted: isAudioMuted,
-                isVideoEnabled: isVideoEnabled,
+                isVideoEnabled: isVideoEnabled || isScreenSharing,
                 isScreenSharing: isScreenSharing
             )),
             conversation
@@ -276,19 +315,13 @@ final class CallService: NSObject, ObservableObject {
     func handle(_ signal: CallSignal, from peerId: String, conversation: Conversation) async {
         if let current = currentCallId {
             if signal.callId != current {
-                // A new offer while we're busy gets "busy"; any other signal
-                // from a different call is stale and ignored.
                 if case .offer(let offer) = signal, Self.isFresh(offer) {
                     try? await sendHandler?(.end(CallEnd(callId: signal.callId, reason: .busy)), conversation)
                 }
                 return
             }
-            // Only the person we're on a call with may control it.
             if let activePeerId, activePeerId != peerId { return }
         } else {
-            // FIX: no call in progress. Only an offer (or an early ICE
-            // candidate that overtook its offer) is meaningful. A late "end" or
-            // "update" from a finished call used to flash a "Call ended" screen.
             switch signal {
             case .offer, .candidate: break
             case .answer, .end, .update: return
@@ -310,13 +343,6 @@ final class CallService: NSObject, ObservableObject {
         }
     }
 
-    /// FIX: an offer that waited in the offline queue must not ring.
-    ///
-    /// Signals travel through the same durable queue as messages, so an offer
-    /// sent while you were offline is delivered when you next open the app —
-    /// possibly hours later — and the phone would ring for a call the caller
-    /// gave up on long ago. The allowance on top of the ring timeout absorbs
-    /// clock differences between the two phones.
     private static func isFresh(_ offer: CallOffer) -> Bool {
         Date().timeIntervalSince(offer.startedAt) < CallLimits.ringTimeout + 15
     }
@@ -337,8 +363,6 @@ final class CallService: NSObject, ObservableObject {
 
         activeConversation = conversation
         activePeerId = peerId
-        // Set before the remote description, so early candidates for this
-        // call are accepted and stale ones from other calls dropped.
         phase = .incoming(callId: offer.callId, isVideo: offer.isVideo, peerId: peerId)
         remoteIsVideoEnabled = offer.isVideo
         isVideoCall = offer.isVideo
@@ -383,7 +407,6 @@ final class CallService: NSObject, ObservableObject {
     private func receiveCandidate(_ candidate: IceCandidate) async {
         #if canImport(WebRTC)
         guard let connection = peerConnection, connection.remoteDescription != nil else {
-            // Arrived before the description it belongs to — buffer it.
             pendingRemoteCandidates.append(candidate)
             return
         }
@@ -396,8 +419,6 @@ final class CallService: NSObject, ObservableObject {
     private func flushPendingCandidates(callId: String) async {
         #if canImport(WebRTC)
         guard let connection = peerConnection else { return }
-        // FIX: only this call's candidates; buffered leftovers from another
-        // call are discarded instead of being fed into this connection.
         for candidate in pendingRemoteCandidates where candidate.callId == callId {
             try? await connection.add(
                 RTCIceCandidate(sdp: candidate.sdp, sdpMLineIndex: candidate.sdpMLineIndex, sdpMid: candidate.sdpMid)
@@ -421,11 +442,14 @@ final class CallService: NSObject, ObservableObject {
         ringTimeoutTask = nil
         connectTimeoutTask?.cancel()
         connectTimeoutTask = nil
+        screenReceiver.stop()
 
         #if canImport(WebRTC)
         let capturer = videoCapturer
         capturer?.stopCapture()
         videoCapturer = nil
+        screenCapturer = nil
+        localVideoSource = nil
         peerConnection?.close()
         peerConnection = nil
         localAudioTrack = nil
@@ -445,7 +469,6 @@ final class CallService: NSObject, ObservableObject {
         connectedAt = nil
         phase = .ended(reason: reason)
 
-        // Back to idle after a moment, so the UI can show why it ended.
         Task {
             try? await Task.sleep(for: .seconds(2))
             if case .ended = self.phase {
@@ -466,9 +489,6 @@ final class CallService: NSObject, ObservableObject {
         }
     }
 
-    /// FIX: without this a call whose media never connects sat on
-    /// "Connecting…" forever. With no TURN server that's not rare — strict
-    /// NATs and some mobile networks can't connect peer-to-peer.
     private func startConnectTimeout() {
         connectTimeoutTask?.cancel()
         connectTimeoutTask = Task { [weak self] in
@@ -491,7 +511,6 @@ final class CallService: NSObject, ObservableObject {
 
     private func configureAudioSession(video: Bool) throws {
         let session = AVAudioSession.sharedInstance()
-        // `.videoChat` prefers the speaker; `.voiceChat` keeps the earpiece.
         try session.setCategory(
             .playAndRecord,
             mode: video ? .videoChat : .voiceChat,
@@ -515,11 +534,6 @@ final class CallService: NSObject, ObservableObject {
         try configureAudioSession(video: video)
 
         let config = RTCConfiguration()
-        // STUN only. Roughly 10–20% of connections (symmetric NAT, strict
-        // corporate/mobile networks) need a TURN relay to connect. Add one here
-        // when you have it:
-        //   RTCIceServer(urlStrings: ["turn:turn.example.com:3478"],
-        //                username: "...", credential: "...")
         config.iceServers = [RTCIceServer(urlStrings: [
             "stun:stun.l.google.com:19302",
             "stun:stun1.l.google.com:19302",
@@ -546,8 +560,10 @@ final class CallService: NSObject, ObservableObject {
         let videoTrack = Self.factory.videoTrack(with: videoSource, trackId: "video0")
         connection.add(videoTrack, streamIds: ["stream0"])
         localVideoTrack = videoTrack
+        localVideoSource = videoSource
         videoCapturer = capturer
         startCameraCapture()
+        startScreenShareListener()
     }
 
     private func startCameraCapture() {
@@ -555,7 +571,6 @@ final class CallService: NSObject, ObservableObject {
               let device = RTCCameraVideoCapturer.captureDevices().first(where: { $0.position == .front })
         else { return }
 
-        // ~640 px wide at up to 30 fps: enough for a call, light on battery.
         let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
         let format = formats.min { a, b in
             let da = CMVideoFormatDescriptionGetDimensions(a.formatDescription)
@@ -573,6 +588,8 @@ final class CallService: NSObject, ObservableObject {
             capturer.stopCapture { continuation.resume() }
         }
     }
+    #else
+    private func stopCameraCapture() async {}
     #endif
 }
 
@@ -601,13 +618,10 @@ extension CallService: RTCPeerConnectionDelegate {
                 }
                 self.ringTimeoutTask?.cancel()
                 self.connectTimeoutTask?.cancel()
-                // Applied after connecting: WebRTC reconfigures the audio
-                // route while connecting and would undo an earlier override.
                 try? AVAudioSession.sharedInstance().overrideOutputAudioPort(self.isSpeakerOn ? .speaker : .none)
             case .failed:
                 await self.endCall(reason: .failed)
             case .disconnected:
-                // Not terminal: ICE recovers from brief network changes.
                 break
             default:
                 break
@@ -615,8 +629,6 @@ extension CallService: RTCPeerConnectionDelegate {
         }
     }
 
-    /// FIX: where the remote video actually arrives (Unified Plan). This
-    /// callback was missing, so there was never a remote track to render.
     nonisolated func peerConnection(
         _ peerConnection: RTCPeerConnection,
         didAdd rtpReceiver: RTCRtpReceiver,
@@ -626,7 +638,6 @@ extension CallService: RTCPeerConnectionDelegate {
         Task { @MainActor in self.remoteVideoTrack = track }
     }
 
-    /// Plan-B fallback for older peers.
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
         guard let track = stream.videoTracks.first else { return }
         Task { @MainActor in
@@ -655,11 +666,22 @@ enum CallError: LocalizedError {
     }
 }
 
-/// Boundary for the Broadcast Upload Extension that screen sharing requires.
+/// Finds the screen-share extension inside the app bundle.
+///
+/// FIX: the old check looked for an App Group container, which never exists
+/// for a sideloaded free-account build — so screen sharing always reported
+/// "isn't set up". The extension now talks to the app over 127.0.0.1 and
+/// needs no App Group.
 enum ScreenShareCoordinator {
-    static let appGroupIdentifier = "group.com.hyperchat.broadcast"
+    static let extensionName = "HyperChatScreenShare"
+
+    static var extensionBundleIdentifier: String {
+        (Bundle.main.bundleIdentifier ?? "com.HyperChat.app") + "." + extensionName
+    }
 
     static var isExtensionConfigured: Bool {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) != nil
+        guard let plugins = Bundle.main.builtInPlugInsURL else { return false }
+        let url = plugins.appendingPathComponent(extensionName + ".appex")
+        return FileManager.default.fileExists(atPath: url.path)
     }
 }

@@ -58,6 +58,7 @@ struct AlarmListView: View {
             }
         }
         .navigationTitle("Alarms")
+        .appScreenStyle()
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {

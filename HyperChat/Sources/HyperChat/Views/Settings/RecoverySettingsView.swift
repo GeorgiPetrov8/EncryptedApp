@@ -37,6 +37,7 @@ struct RecoverySettingsView: View {
             }
         }
         .navigationTitle("Account Recovery")
+        .appScreenStyle()
         .disabled(isWorking || service.isBusy)
         .overlay { if isWorking || service.isBusy { ProgressView() } }
         .task { await service.refreshEmailStatus() }

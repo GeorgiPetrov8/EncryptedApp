@@ -15,16 +15,14 @@ const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
 const USER_ID_RE = /^[a-zA-Z0-9-]{1,64}$/;
 
 /**
- * Every envelope content type the app sends.
+ * Every envelope content type the app sends. Keep in sync with
+ * `EnvelopePayloadKind` in DTOs.swift.
  *
- * FIX: 'call' and 'edit' were missing, so the server answered every call
- * signal and every message edit with 400 — calls could never connect and
- * edits never reached the other side. Keep this list in sync with
- * `EnvelopePayloadKind` in DTOs.swift; `test/server.test.js` checks it.
+ * NEW: 'reaction' (emoji reactions). Without it every reaction gets a 400.
  */
 const ALLOWED_CONTENT_TYPES = [
   'text', 'image', 'video', 'file',
-  'notePad', 'receipt', 'profile', 'invite', 'call', 'edit',
+  'notePad', 'receipt', 'profile', 'invite', 'call', 'edit', 'reaction',
 ];
 
 function isValidUsername(value) {

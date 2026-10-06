@@ -25,6 +25,7 @@ struct InvitationsView: View {
             }
         }
         .navigationTitle("Invitations")
+        .appScreenStyle()
         .onAppear { service.reloadPending() }
     }
 }
@@ -75,6 +76,7 @@ private struct InvitationRow: View {
                     Text("Accept").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.accentColor)
 
                 Button(role: .destructive) {
                     isWorking = true
@@ -84,8 +86,6 @@ private struct InvitationRow: View {
                 }
                 .buttonStyle(.bordered)
             }
-            // Bordered styles (not plain) matter here: in a List, two plain
-            // buttons in one row both fire on any tap.
             .disabled(isWorking)
 
             Text("They can't message or call you until you accept.")
@@ -122,8 +122,6 @@ struct NewInvitationView: View {
     @State private var isSending = false
     @State private var errorMessage: String?
 
-    /// Handed the created conversation so the caller can open it straight away
-    /// — the chat exists immediately for the sender.
     let onInvited: (Conversation) -> Void
 
     var body: some View {

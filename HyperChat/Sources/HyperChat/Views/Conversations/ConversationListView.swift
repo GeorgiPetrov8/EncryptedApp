@@ -21,23 +21,17 @@ struct ConversationListView: View {
 
     private var listAppearance: ChatAppearance { container.appearanceStore.listAppearance }
     private var chrome: ChromeStyle { container.appearanceStore.chrome(for: listAppearance) }
+    private var barTint: Color { container.appearanceStore.barTint }
 
     var body: some View {
         NavigationStack {
             list
-                .scrollContentBackground(.hidden)
-                .background {
-                    ChatBackgroundView(appearance: listAppearance) {
-                        container.appearanceStore.imageURL(fileName: $0)
-                    }
-                }
+                // FIX: a little space between the bar and the first chat —
+                // they used to touch.
+                .contentMargins(.top, 12, for: .scrollContent)
+                .appScreenStyle(adaptsContent: false)
                 .navigationTitle("Chats")
                 .toolbar { toolbarContent }
-                // The navigation bar takes the same derived colour as the chat
-                // notches; its title is forced to the readable scheme.
-                .toolbarBackground(navigationBarFill, for: .navigationBar)
-                .toolbarBackground(chrome.fill == nil ? .automatic : .visible, for: .navigationBar)
-                .toolbarColorScheme(chrome.colorScheme, for: .navigationBar)
                 .navigationDestination(item: $navigateToConversation) { conversation in
                     ChatView(container: container, conversation: conversation)
                 }
@@ -59,18 +53,16 @@ struct ConversationListView: View {
                 .onAppear {
                     viewModel.reload()
                     container.invitationService.reloadPending()
+                    MediaExporter.purge()
                 }
                 .task { await container.invitationService.requestNotificationPermission() }
         }
+        // Back buttons on every pushed screen use the bar colour.
+        .tint(barTint)
         .fullScreenCover(isPresented: isCallPresented) {
             CallView()
                 .environmentObject(container)
         }
-    }
-
-    private var navigationBarFill: AnyShapeStyle {
-        if let fill = chrome.fill { return AnyShapeStyle(fill) }
-        return AnyShapeStyle(.bar)
     }
 
     private var isCallPresented: Binding<Bool> {
@@ -112,8 +104,6 @@ struct ConversationListView: View {
         .listRowSpacing(chrome.fill == nil ? 0 : 8)
     }
 
-    /// On a custom background each row is a small notch of its own, so names
-    /// read against the derived bar colour rather than the photo/colour behind.
     @ViewBuilder
     private var rowBackground: some View {
         if let fill = chrome.fill {
@@ -129,6 +119,8 @@ struct ConversationListView: View {
     }
 
     // MARK: Toolbar
+    //
+    // Every icon gets an explicit colour — see `AppScreenStyle` for why.
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
@@ -137,19 +129,23 @@ struct ConversationListView: View {
                 SettingsView()
             } label: {
                 Image(systemName: "gearshape")
+                    .foregroundStyle(barTint)
             }
+            .accessibilityLabel("Settings")
         }
         ToolbarItem(placement: .principal) {
             ConnectionIndicator(
                 isListening: container.messagingService.isListening,
                 isSyncing: container.messagingService.isSyncing
             )
+            .foregroundStyle(barTint)
         }
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             NavigationLink {
                 InvitationsView()
             } label: {
                 Image(systemName: "person.crop.circle.badge.questionmark")
+                    .foregroundStyle(barTint)
                     .overlay(alignment: .topTrailing) { invitationBadge }
             }
             .accessibilityLabel("Invitations, \(container.invitationService.pendingCount) pending")
@@ -158,6 +154,7 @@ struct ConversationListView: View {
                 showNewInvitation = true
             } label: {
                 Image(systemName: "square.and.pencil")
+                    .foregroundStyle(barTint)
             }
             .accessibilityLabel("New chat")
         }
@@ -183,8 +180,6 @@ private struct ConversationRow: View {
     let isOnline: Bool
     let chrome: ChromeStyle
 
-    /// On a custom background, name and preview use the bar's readable colour
-    /// at full strength (preview differs by size/weight, not transparency).
     private var primary: Color { chrome.fill == nil ? .primary : chrome.foreground }
     private var secondary: Color { chrome.fill == nil ? .secondary : chrome.foreground }
 

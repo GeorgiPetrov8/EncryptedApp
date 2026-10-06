@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import PhotosUI
 import Combine
+import UniformTypeIdentifiers
 
 struct DisplayMessage: Identifiable {
     let id: String
@@ -16,14 +17,20 @@ struct DisplayMessage: Identifiable {
     let createdAt: Date
     let deliveredAt: Date?
     let readAt: Date?
-    /// The message this one replies to, if any.
     let replyTo: ReplyReference?
-    /// "You" or the contact's name, for the quote header.
     let replyAuthorName: String?
     let isEdited: Bool
     let canEdit: Bool
-    /// Text to copy; nil for media.
     let copyText: String?
+    /// NEW
+    let gif: GIFAttachment?
+    let reactions: [ReactionSummary]
+    let myReaction: String?
+
+    /// Photo, video, voice message or document — something that can be saved.
+    var isMediaAttachment: Bool {
+        status != .undecryptable && contentType != .text
+    }
 }
 
 @MainActor
@@ -44,17 +51,18 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isUpdatingInvitation = false
     @Published private(set) var wasRemoved = false
 
-    /// The message being replied to (shown above the composer).
     @Published private(set) var replyingTo: DisplayMessage?
-    /// The message being edited (its text is loaded into the composer).
     @Published private(set) var editing: DisplayMessage?
-    /// Bumped to move keyboard focus into the composer.
     @Published private(set) var focusRequest = 0
+
+    /// NEW: a decrypted copy waiting in the share sheet / video player.
+    @Published var sharedFile: ExportedFile?
+    @Published var playingVideo: ExportedFile?
 
     @Published var selectedPhotoItem: PhotosPickerItem? {
         didSet {
             guard let item = selectedPhotoItem else { return }
-            Task { await sendPhoto(item) }
+            Task { await sendPickedItem(item) }
         }
     }
     @Published private(set) var isSendingMedia = false
@@ -238,6 +246,65 @@ final class ChatViewModel: ObservableObject {
         )
     }
 
+    // MARK: Reactions
+
+    /// `emoji == nil` removes your reaction.
+    func react(to message: DisplayMessage, emoji: String?) {
+        guard canCompose, message.status != .undecryptable else { return }
+        Task {
+            do {
+                try await messagingService.sendReaction(messageId: message.id, emoji: emoji, in: conversation)
+            } catch {
+                errorMessage = "Couldn't send the reaction: \(error.localizedDescription)"
+            }
+            reload()
+        }
+    }
+
+    // MARK: Saving / sharing / playing media
+
+    func shareMedia(messageId: String) async {
+        guard let url = await exportDecryptedCopy(messageId: messageId) else { return }
+        sharedFile = ExportedFile(url: url)
+    }
+
+    func playVideo(messageId: String) async {
+        guard let url = await exportDecryptedCopy(messageId: messageId) else { return }
+        playingVideo = ExportedFile(url: url)
+    }
+
+    func finishedWith(_ file: ExportedFile) {
+        MediaExporter.remove(file.url)
+        if sharedFile?.id == file.id { sharedFile = nil }
+        if playingVideo?.id == file.id { playingVideo = nil }
+    }
+
+    private func exportDecryptedCopy(messageId: String) async -> URL? {
+        guard let message = messagesById[messageId],
+              let data = await loadMediaData(forMessageId: messageId) else {
+            if errorMessage == nil { errorMessage = "Couldn't open that attachment." }
+            return nil
+        }
+        let expected = messagingService.mediaDisplayMetadata(for: message)?.mediaType
+        var fileExtension = "bin"
+        if case .success(let accepted) = AttachmentPolicy.checkReceived(data, expected: expected) {
+            fileExtension = accepted.displayExtension
+        }
+        let prefix: String
+        switch expected {
+        case .image: prefix = "HyperChat-Photo"
+        case .video: prefix = "HyperChat-Video"
+        case .audio: prefix = "HyperChat-Voice"
+        case .document, .none: prefix = "HyperChat-File"
+        }
+        do {
+            return try MediaExporter.write(data, fileExtension: fileExtension, prefix: prefix)
+        } catch {
+            errorMessage = "Couldn't prepare the file: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
     // MARK: Visibility (read receipts)
 
     func setVisible(_ visible: Bool) {
@@ -279,10 +346,17 @@ final class ChatViewModel: ObservableObject {
         do {
             let stored = try messageRepository.fetchMessages(conversationId: conversation.id, ownerUserId: myUserId)
             messagesById = Dictionary(uniqueKeysWithValues: stored.map { ($0.id, $0) })
+            let reactionsByMessage = Dictionary(
+                grouping: messagingService.reactions(in: conversation.id).filter { !$0.emoji.isEmpty },
+                by: \.messageId
+            )
+
             messages = stored.map { message in
                 let media = messagingService.mediaDisplayMetadata(for: message)
                 let textPayload = messagingService.textContent(for: message)
                 let reply = textPayload?.replyTo
+                let gif = textPayload?.gif
+                let reactions = reactionsByMessage[message.id] ?? []
                 return DisplayMessage(
                     id: message.id,
                     senderId: message.senderId,
@@ -300,7 +374,10 @@ final class ChatViewModel: ObservableObject {
                     replyAuthorName: reply.map { $0.senderId == myUserId ? "You" : peerUsername },
                     isEdited: message.editedAt != nil,
                     canEdit: messagingService.canEdit(message),
-                    copyText: textPayload?.text
+                    copyText: gif == nil ? textPayload?.text : nil,
+                    gif: gif,
+                    reactions: Self.summaries(reactions, me: myUserId),
+                    myReaction: reactions.first { $0.reactorId == myUserId }?.emoji
                 )
             }
             markVisibleMessagesRead()
@@ -309,17 +386,26 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// One capsule per emoji, in the order they were first used.
+    private static func summaries(_ reactions: [MessageReaction], me: String) -> [ReactionSummary] {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        var mine: String?
+        for reaction in reactions.sorted(by: { $0.updatedAt < $1.updatedAt }) {
+            if counts[reaction.emoji] == nil { order.append(reaction.emoji) }
+            counts[reaction.emoji, default: 0] += 1
+            if reaction.reactorId == me { mine = reaction.emoji }
+        }
+        return order.map { ReactionSummary(emoji: $0, count: counts[$0] ?? 0, includesMe: $0 == mine) }
+    }
+
     func loadMediaData(forMessageId messageId: String) async -> Data? {
-        guard let message = messagesById[messageId],
-              let data = try? await messagingService.mediaData(for: message) else { return nil }
-        // Проверка на устройството на получателя: блокира програми и файлове,
-        // чието съдържание не отговаря на типа, с който са пратени.
-        let expected = messagingService.mediaDisplayMetadata(for: message)?.mediaType
-        switch AttachmentPolicy.checkReceived(data, expected: expected) {
-        case .success:
-            return data
-        case .failure(let rejection):
-            errorMessage = rejection.localizedDescription
+        guard let message = messagesById[messageId] else { return nil }
+        do {
+            // The recipient-side content check runs inside `decryptMedia`.
+            return try await messagingService.mediaData(for: message)
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? "Couldn't open that attachment."
             return nil
         }
     }
@@ -343,16 +429,30 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Media
 
-    private func sendPhoto(_ item: PhotosPickerItem) async {
+    /// FIX: handles videos too. Everything from the library used to go
+    /// through the photo loader, so picking a video failed with
+    /// "That photo couldn't be processed".
+    private func sendPickedItem(_ item: PhotosPickerItem) async {
         defer { selectedPhotoItem = nil }
+        let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
+
         await sendMediaGuarded {
-            let prepared = try await PhotoAttachmentLoader.loadAndPrepare(item)
-            try await self.messagingService.sendMedia(
-                rawData: prepared.imageData,
-                thumbnail: prepared.thumbnailData,
-                mediaType: .image,
-                in: self.conversation
-            )
+            if isVideo {
+                guard let movie = try await item.loadTransferable(type: PickedMovie.self) else {
+                    throw PhotoAttachmentLoader.LoadError.noData
+                }
+                defer { MediaExporter.remove(movie.url) }
+                let data = try await VideoCompressor.prepare(movie.url)
+                try await self.messagingService.sendMedia(rawData: data, thumbnail: nil, mediaType: .video, in: self.conversation)
+            } else {
+                let prepared = try await PhotoAttachmentLoader.loadAndPrepare(item)
+                try await self.messagingService.sendMedia(
+                    rawData: prepared.imageData,
+                    thumbnail: prepared.thumbnailData,
+                    mediaType: .image,
+                    in: self.conversation
+                )
+            }
         }
     }
 
@@ -362,7 +462,7 @@ final class ChatViewModel: ObservableObject {
             case .photo(let data):
                 try await self.messagingService.sendMedia(rawData: data, thumbnail: nil, mediaType: .image, in: self.conversation)
             case .video(let url):
-                let data = try Data(contentsOf: url)
+                let data = try await VideoCompressor.prepare(url)
                 try await self.messagingService.sendMedia(rawData: data, thumbnail: nil, mediaType: .video, in: self.conversation)
             }
         }
@@ -380,25 +480,33 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
-        switch AttachmentPolicy.inspect(data: data, declaredExtension: url.pathExtension) {
-        case .failure(let rejection):
+        if case .failure(let rejection) = AttachmentPolicy.inspect(data: data, declaredExtension: url.pathExtension) {
             errorMessage = rejection.localizedDescription
             return
-        case .success:
-            break
         }
 
         await sendMediaGuarded {
-            try await self.messagingService.sendMedia(
-                rawData: data, thumbnail: nil, mediaType: .document, in: self.conversation
-            )
+            try await self.messagingService.sendMedia(rawData: data, thumbnail: nil, mediaType: .document, in: self.conversation)
         }
     }
 
-    func sendGIF(_ data: Data) async {
-        await sendMediaGuarded {
-            try await self.messagingService.sendMedia(rawData: data, thumbnail: nil, mediaType: .image, in: self.conversation)
+    /// NEW: sends a GIF as a link (see `GIFService`).
+    func sendGIF(_ gif: GIFAttachment) async {
+        guard canCompose else {
+            errorMessage = composeDisabledReason
+            return
         }
+        let reply = replyingTo.map(replyReference)
+        replyingTo = nil
+        isSending = true
+        defer { isSending = false }
+        do {
+            try await messagingService.sendGIF(gif, replyTo: reply, in: conversation)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        reload()
     }
 
     func sendVoiceMessage(_ voiceMessage: RecordedVoiceMessage) async {
@@ -423,12 +531,13 @@ final class ChatViewModel: ObservableObject {
         defer { isSendingMedia = false }
         do {
             try await operation()
+            errorMessage = nil
             reload()
         } catch let identityError as IdentityError {
             reloadPeer()
             errorMessage = identityError.localizedDescription
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             reload()
         }
     }

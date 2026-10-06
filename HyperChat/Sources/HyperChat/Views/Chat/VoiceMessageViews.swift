@@ -6,12 +6,6 @@ import AVFoundation
 /// - Hold, then release → sends.
 /// - Quick tap → locks (records hands-free, shows Send / Delete / Pause).
 /// - While holding, slide up → locks; slide left → cancels.
-///
-/// FIX: the old composer *removed* this button from the view hierarchy as soon
-/// as recording started (it swapped the text field and mic for the recording
-/// bar). A gesture whose view disappears never gets `onEnded`, so releasing the
-/// finger did nothing and the recording could never be sent. The composer now
-/// keeps this button on screen for the whole press.
 struct VoiceRecordButton: View {
     @ObservedObject var recorder: VoiceRecorder
     let isDisabled: Bool
@@ -23,7 +17,6 @@ struct VoiceRecordButton: View {
 
     private let cancelThreshold: CGFloat = -80
     private let lockThreshold: CGFloat = -60
-    /// A press shorter than this counts as a tap.
     private let tapDuration: TimeInterval = 0.35
 
     var body: some View {
@@ -82,7 +75,6 @@ struct VoiceRecordButton: View {
                     return
                 }
                 if let started, Date().timeIntervalSince(started) < tapDuration {
-                    // A tap: keep recording hands-free.
                     recorder.lock()
                     return
                 }
@@ -92,8 +84,6 @@ struct VoiceRecordButton: View {
             }
     }
 
-    /// Synchronous when permission is already granted, so a quick tap can't
-    /// end before recording has started.
     private func begin() {
         switch recorder.permissionStatus {
         case .granted:
@@ -106,7 +96,6 @@ struct VoiceRecordButton: View {
         case .denied:
             permissionDenied = true
         default:
-            // First use: ask, and let the user press again once allowed.
             Task {
                 if await recorder.requestPermission() == false {
                     permissionDenied = true
@@ -122,16 +111,13 @@ struct VoiceRecordingBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(.red)
-                .frame(width: 9, height: 9)
-                .opacity(recorder.isPaused ? 0.3 : 1)
+            RecordingDot(isPaused: recorder.isPaused)
 
             Text(timeString(recorder.duration))
                 .font(.system(.body, design: .monospaced))
                 .monospacedDigit()
 
-            LiveWaveform(level: recorder.level)
+            LiveWaveform(levels: recorder.recentLevels, isPaused: recorder.isPaused)
 
             Spacer(minLength: 4)
 
@@ -150,6 +136,53 @@ struct VoiceRecordingBar: View {
 
     private func timeString(_ interval: TimeInterval) -> String {
         String(format: "%d:%02d", Int(interval) / 60, Int(interval) % 60)
+    }
+}
+
+/// Pulses continuously while recording, independent of the sound level —
+/// so it's always obvious the microphone is on, even in a silent room.
+private struct RecordingDot: View {
+    let isPaused: Bool
+
+    var body: some View {
+        TimelineView(.animation(paused: isPaused)) { context in
+            let phase = context.date.timeIntervalSinceReferenceDate
+            let pulse = isPaused ? 0.3 : 0.55 + 0.45 * abs(sin(phase * 3))
+            Circle()
+                .fill(.red)
+                .frame(width: 9, height: 9)
+                .opacity(pulse)
+        }
+    }
+}
+
+/// FIX: draws from the recorder's rolling buffer, which is republished every
+/// 50 ms. The old version only redrew when the level *changed*, so it froze
+/// in silence. Silent samples are shown as a small "breathing" bar rather
+/// than nothing, so the waveform keeps moving.
+private struct LiveWaveform: View {
+    let levels: [Float]
+    let isPaused: Bool
+
+    var body: some View {
+        TimelineView(.animation(paused: isPaused)) { context in
+            let phase = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 2) {
+                ForEach(levels.indices, id: \.self) { index in
+                    Capsule()
+                        .fill(.red.opacity(0.8))
+                        .frame(width: 2, height: barHeight(levels[index], index: index, phase: phase))
+                }
+            }
+            .frame(height: 22)
+        }
+    }
+
+    private func barHeight(_ level: Float, index: Int, phase: Double) -> CGFloat {
+        let base = CGFloat(level) * 20
+        guard base < 3 else { return base }
+        let idle = isPaused ? 0 : 1.5 * abs(sin(phase * 4 + Double(index) * 0.5))
+        return 3 + CGFloat(idle)
     }
 }
 
@@ -188,25 +221,6 @@ struct LockedRecordingControls: View {
                     .font(.title)
             }
             .accessibilityLabel("Send voice message")
-        }
-    }
-}
-
-private struct LiveWaveform: View {
-    let level: Float
-    @State private var history: [Float] = Array(repeating: 0, count: 20)
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(history.indices, id: \.self) { index in
-                Capsule()
-                    .fill(.red.opacity(0.8))
-                    .frame(width: 2, height: max(3, CGFloat(history[index]) * 20))
-            }
-        }
-        .onChange(of: level) { _, newValue in
-            history.removeFirst()
-            history.append(newValue)
         }
     }
 }

@@ -20,6 +20,10 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>GIF_API_HOST</key>
+	<string>$(GIF_API_HOST)</string>
+	<key>GIF_API_KEY</key>
+	<string>$(GIF_API_KEY)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -30,7 +34,9 @@
 	<key>NSFaceIDUsageDescription</key>
 	<string>HyperChat uses Face ID to protect access to your conversations.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>HyperChat needs microphone access to record voice messages.</string>
+	<string>HyperChat needs microphone access for calls and voice messages.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>HyperChat saves photos and videos you choose to your library.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>HyperChat needs photo library access to attach images and videos to encrypted messages.</string>
 	<key>UIBackgroundModes</key>

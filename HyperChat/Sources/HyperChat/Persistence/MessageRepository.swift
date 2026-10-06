@@ -53,7 +53,7 @@ final class MessageRepository {
     }
 
     /// Marks an envelope processed without inserting a `Message` row
-    /// (control messages: pad, receipts, profile, invite, call, edit).
+    /// (control messages: pad, receipts, profile, invite, call, edit, reaction).
     @discardableResult
     func markEnvelopeProcessed(envelopeId: String, recipientUserId: String, senderId: String) throws -> Bool {
         try dbQueue.write { db in
@@ -155,7 +155,6 @@ final class MessageRepository {
         }
     }
 
-    /// Replaces a message's stored (storage-key-encrypted) content after an edit.
     func updateContent(messageId: String, ownerUserId: String, encryptedContent: Data, editedAt: Date) throws {
         try dbQueue.write { db in
             guard var message = try Message.fetchOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId)) else {
@@ -167,10 +166,44 @@ final class MessageRepository {
         }
     }
 
-    /// "Delete for me". The media row goes with it via the foreign-key cascade.
+    /// "Delete for me". Media and reactions go with it via foreign-key cascade.
     func delete(messageId: String, ownerUserId: String) throws {
         try dbQueue.write { db in
             _ = try Message.deleteOne(db, key: Self.key(ownerUserId: ownerUserId, id: messageId))
+        }
+    }
+
+    // MARK: Reactions
+
+    /// Stores a reaction if it is newer than what this person had on this
+    /// message. Ignored when the message isn't on this device (yet).
+    @discardableResult
+    func upsertReactionIfNewer(_ reaction: MessageReaction) throws -> Bool {
+        try dbQueue.write { db in
+            guard try Message.fetchOne(
+                db, key: Self.key(ownerUserId: reaction.ownerUserId, id: reaction.messageId)
+            ) != nil else { return false }
+
+            let reactionKey: [String: DatabaseValueConvertible] = [
+                "ownerUserId": reaction.ownerUserId,
+                "messageId": reaction.messageId,
+                "reactorId": reaction.reactorId,
+            ]
+            if let existing = try MessageReaction.fetchOne(db, key: reactionKey),
+               existing.updatedAt >= reaction.updatedAt {
+                return false
+            }
+            try reaction.save(db)
+            return true
+        }
+    }
+
+    func fetchReactions(conversationId: String, ownerUserId: String) throws -> [MessageReaction] {
+        try dbQueue.read { db in
+            try MessageReaction
+                .filter(Column("ownerUserId") == ownerUserId)
+                .filter(Column("conversationId") == conversationId)
+                .fetchAll(db)
         }
     }
 
@@ -198,6 +231,7 @@ final class MessageRepository {
 
     func deleteAll(ownerUserId: String) throws {
         try dbQueue.write { db in
+            _ = try MessageReaction.filter(Column("ownerUserId") == ownerUserId).deleteAll(db)
             _ = try Message.filter(Column("ownerUserId") == ownerUserId).deleteAll(db)
             _ = try ProcessedEnvelope.filter(Column("recipientUserId") == ownerUserId).deleteAll(db)
         }

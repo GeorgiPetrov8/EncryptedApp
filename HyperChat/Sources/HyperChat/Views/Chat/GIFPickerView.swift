@@ -1,16 +1,15 @@
 import SwiftUI
 
-/// Tenor GIF search (feature: GIFs).
+/// GIF search (KLIPY / GIPHY).
 struct GIFPickerView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
 
     @State private var query = ""
-    @State private var isSending = false
 
-    let onPicked: (Data) -> Void
+    let onPicked: (GIFAttachment) -> Void
 
-    private var service: TenorService { container.tenorService }
+    private var service: GIFService { container.tenorService }
 
     var body: some View {
         NavigationStack {
@@ -21,7 +20,7 @@ struct GIFPickerView: View {
                     ContentUnavailableView(
                         "GIF search isn't set up",
                         systemImage: "wrench.and.screwdriver",
-                        description: Text("This build has no Tenor API key configured.")
+                        description: Text("This build has no GIF_API_KEY. Get a free key at partner.klipy.com and add it to Info.plist.")
                     )
                 } else {
                     grid
@@ -37,37 +36,31 @@ struct GIFPickerView: View {
         }
     }
 
-    /// Shown before any network request is made.
-    ///
-    /// Spelled out rather than buried in a privacy policy, because in an app
-    /// built on "nobody sees your messages", quietly sending what you type to
-    /// Google would be the sort of thing a user would be right to be annoyed
-    /// about discovering later.
     private var consentGate: some View {
         VStack(spacing: 18) {
             Image(systemName: "hand.raised.fill")
                 .font(.system(size: 44))
                 .foregroundStyle(.tint)
 
-            Text("GIF search uses Tenor")
+            Text("GIFs come from \(service.providerName)")
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 10) {
-                Label("Your search terms go to Tenor (owned by Google).", systemImage: "magnifyingglass")
-                Label("Tenor sees your IP address when you search.", systemImage: "network")
-                Label("The person you send it to never contacts Tenor — the GIF is sent encrypted, like any other attachment.", systemImage: "lock.fill")
+                Label("Your search terms go to \(service.providerName).", systemImage: "magnifyingglass")
+                Label("\(service.providerName) sees your IP address when you search or load a GIF.", systemImage: "network")
+                Label("The GIF link is sent end-to-end encrypted. The other person's phone loads it from \(service.providerName) — automatically only if they turned GIFs on, otherwise after they tap it.", systemImage: "lock.fill")
             }
             .font(.footnote)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button("Enable GIF search") {
+            Button("Turn on GIFs") {
                 service.isEnabled = true
                 service.search("")
             }
             .buttonStyle(.borderedProminent)
 
-            Text("You can turn this off again in Settings.")
+            Text("You can turn this off again in Settings → Privacy.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -86,12 +79,18 @@ struct GIFPickerView: View {
             }
 
             ScrollView {
-                // A staggered two-column layout, because GIFs vary wildly in
-                // aspect ratio and a fixed grid would either crop them or
-                // leave large gaps.
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)], spacing: 4) {
                     ForEach(service.results) { gif in
-                        GIFCell(gif: gif) { pick(gif) }
+                        Button {
+                            onPicked(service.attachment(for: gif))
+                            dismiss()
+                        } label: {
+                            AnimatedGIFView(url: gif.previewURL, maxPixelSize: 240)
+                                .frame(height: 110)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(gif.description)
                     }
                 }
                 .padding(4)
@@ -101,9 +100,14 @@ struct GIFPickerView: View {
                     ProgressView()
                 }
             }
+
+            // Required attribution.
+            Text("Powered by \(service.providerName)")
+                .font(.caption2.bold())
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 6)
         }
         .task {
-            // Featured GIFs on open, so the grid isn't empty before typing.
             if service.results.isEmpty { service.search("") }
         }
     }
@@ -111,7 +115,7 @@ struct GIFPickerView: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("Search Tenor", text: $query)
+            TextField("Search \(service.providerName)", text: $query)
                 .textFieldStyle(.plain)
                 .autocorrectionDisabled()
                 .onChange(of: query) { _, newValue in service.search(newValue) }
@@ -127,52 +131,6 @@ struct GIFPickerView: View {
         .padding(10)
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
         .padding(.horizontal)
-        .padding(.bottom, 8)
-    }
-
-    private func pick(_ gif: TenorGIF) {
-        guard !isSending else { return }
-        isSending = true
-        Task {
-            defer { isSending = false }
-            do {
-                // Downloaded here, then handed to the normal encrypted media
-                // path — so the recipient never talks to Tenor.
-                let data = try await service.downloadGIFData(gif)
-                onPicked(data)
-                dismiss()
-            } catch {
-                service.clear()
-            }
-        }
-    }
-}
-
-private struct GIFCell: View {
-    let gif: TenorGIF
-    let onTap: () -> Void
-
-    var body: some View {
-        Button(action: onTap) {
-            AsyncImage(url: gif.previewURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                case .failure:
-                    Color(.tertiarySystemBackground)
-                        .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
-                default:
-                    Color(.tertiarySystemBackground)
-                        .overlay(ProgressView())
-                }
-            }
-            .frame(height: 110)
-            .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-        .buttonStyle(.plain)
-        // The GIF itself is opaque to VoiceOver; Tenor's description is the
-        // only text that makes it navigable.
-        .accessibilityLabel(gif.description)
+        .padding(.vertical, 8)
     }
 }

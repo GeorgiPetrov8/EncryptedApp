@@ -1,41 +1,34 @@
 import SwiftUI
-import PhotosUI
 import UniformTypeIdentifiers
 
 /// The attachment menu in the composer: camera, library, document, GIF.
 ///
-/// Replaces the single paperclip that only opened the photo library.
+/// FIX (photos/videos couldn't be sent): the photo picker used to be a
+/// `PhotosPicker` *inside* this `Menu`. The menu closes the moment an item is
+/// tapped and SwiftUI tears its content down — including the picker's
+/// selection binding — so the chosen photo was often never delivered. The
+/// menu now only raises a flag; the picker is attached to the chat screen
+/// itself with `.photosPicker(isPresented:)`, which stays alive.
 struct AttachmentMenu: View {
-    @Binding var selectedPhotoItem: PhotosPickerItem?
     let isDisabled: Bool
     let onCamera: () -> Void
+    let onPhotoLibrary: () -> Void
     let onDocument: () -> Void
     let onGIF: () -> Void
     var tint: Color = .accentColor
 
     var body: some View {
         Menu {
-            Button {
-                onCamera()
-            } label: {
+            Button(action: onCamera) {
                 Label("Camera", systemImage: "camera")
             }
-
-            // `PhotosPicker` inside a `Menu` works because the picker presents
-            // itself; it doesn't need the menu to stay alive.
-            PhotosPicker(selection: $selectedPhotoItem, matching: .any(of: [.images, .videos])) {
+            Button(action: onPhotoLibrary) {
                 Label("Photo or Video", systemImage: "photo.on.rectangle")
             }
-
-            Button {
-                onDocument()
-            } label: {
+            Button(action: onDocument) {
                 Label("Document", systemImage: "doc")
             }
-
-            Button {
-                onGIF()
-            } label: {
+            Button(action: onGIF) {
                 Label("GIF", systemImage: "face.smiling")
             }
         } label: {
@@ -49,26 +42,16 @@ struct AttachmentMenu: View {
 }
 
 /// `UIDocumentPickerViewController` wrapper.
-///
-/// The type list is an allow-list at the picker level too — not as a security
-/// control (`AttachmentPolicy` is that, and it inspects bytes), but so the
-/// user doesn't pick a file, wait for it to copy, and only then be told it
-/// isn't allowed.
 struct DocumentPicker: UIViewControllerRepresentable {
     let onPicked: (URL) -> Void
     let onCancelled: () -> Void
 
     private static let allowedTypes: [UTType] = {
         var types: [UTType] = [.pdf, .plainText, .rtf, .commaSeparatedText]
-        // Office formats aren't in `UTType`'s static list, so they're built
-        // from their identifiers; `compactMap` drops any the OS doesn't know.
         let officeIdentifiers = [
             "org.openxmlformats.wordprocessingml.document",   // .docx
             "org.openxmlformats.spreadsheetml.sheet",         // .xlsx
             "org.openxmlformats.presentationml.presentation", // .pptx
-            "com.microsoft.word.doc",
-            "com.microsoft.excel.xls",
-            "com.microsoft.powerpoint.ppt",
         ]
         types.append(contentsOf: officeIdentifiers.compactMap(UTType.init))
         return types
@@ -108,11 +91,6 @@ struct DocumentPicker: UIViewControllerRepresentable {
 }
 
 /// `UIImagePickerController` for in-app capture.
-///
-/// `UIImagePickerController` is deprecated for *library* access — that's what
-/// `PhotosPicker` replaced — but it remains the supported way to capture from
-/// the camera with a system UI. `AVCaptureSession` is the alternative and
-/// means building the entire capture interface by hand.
 struct CameraPicker: UIViewControllerRepresentable {
     enum Capture {
         case photo(Data)
@@ -127,8 +105,6 @@ struct CameraPicker: UIViewControllerRepresentable {
         picker.sourceType = .camera
         picker.mediaTypes = [UTType.image.identifier, UTType.movie.identifier]
         picker.videoQuality = .typeMedium
-        // Two minutes. Long enough for anything sent in a chat, short enough
-        // that the file stays a reasonable size.
         picker.videoMaximumDuration = 120
         picker.delegate = context.coordinator
         return picker
@@ -158,9 +134,6 @@ struct CameraPicker: UIViewControllerRepresentable {
                 return
             }
             if let image = info[.originalImage] as? UIImage,
-               // Re-encoded to JPEG rather than sent as a `UIImage`: the
-               // capture is already in memory uncompressed, and 0.8 quality
-               // is visually indistinguishable at a fraction of the size.
                let data = image.jpegData(compressionQuality: 0.8) {
                 onCaptured(.photo(data))
                 return

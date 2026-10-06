@@ -51,7 +51,7 @@ final class MessagingService: ObservableObject {
     @Published private(set) var isSyncing = false
 
     /// Emits a conversation id when its messages changed locally without an
-    /// incoming message (queued flush, implicit acceptance, an edit).
+    /// incoming message (queued flush, implicit acceptance, an edit, a reaction).
     let conversationChanged = PassthroughSubject<String, Never>()
 
     private let cryptoService: CryptoService
@@ -251,13 +251,7 @@ final class MessagingService: ObservableObject {
     }
 
     /// After restoring a backup on a new device: start a fresh session with
-    /// every accepted contact.
-    ///
-    /// The restored device has the right identity but no ratchet state (old
-    /// sessions are deliberately not restored — see `exportKeyMaterial`). An
-    /// empty delivery receipt is the cheapest thing to send: it forces a new
-    /// X3DH handshake, the contact's app rebuilds its side from it (see
-    /// `handleIncoming`), and applying an empty receipt changes nothing.
+    /// every accepted contact (see `exportKeyMaterial`).
     func reestablishSessions() async {
         guard let me = authService.currentUserId,
               let conversations = try? conversationRepository.fetchAllSortedByRecentActivity(ownerUserId: me)
@@ -517,10 +511,15 @@ final class MessagingService: ObservableObject {
 
     // MARK: Sending — chat messages
 
-    /// Sends a text message, optionally as a reply. The default argument keeps
-    /// existing `sendText(_:in:)` call sites (e.g. the alarm word) working.
     func sendText(_ text: String, replyTo: ReplyReference? = nil, in conversation: Conversation) async throws {
         let payload = TextPayload(text: text, replyTo: replyTo)
+        try await send(plaintext: try payload.encoded(), contentType: .text, in: conversation)
+    }
+
+    /// NEW: sends a GIF as a link inside an encrypted text message. Older
+    /// app versions show the fallback text.
+    func sendGIF(_ gif: GIFAttachment, replyTo: ReplyReference? = nil, in conversation: Conversation) async throws {
+        let payload = TextPayload(text: "🎞️ GIF", replyTo: replyTo, gif: gif)
         try await send(plaintext: try payload.encoded(), contentType: .text, in: conversation)
     }
 
@@ -593,7 +592,6 @@ final class MessagingService: ObservableObject {
         )
         try messageRepository.insert(message, media: media)
 
-        // While our invitation is pending the message waits locally.
         guard state == .accepted else { return }
 
         do {
@@ -647,12 +645,9 @@ final class MessagingService: ObservableObject {
             && !message.isUndecryptable
             && message.deliveryStatus != .failed
             && Date().timeIntervalSince(message.createdAt) <= MessageEditPolicy.window
+            && textContent(for: message)?.gif == nil
     }
 
-    /// Changes the text of one of our own messages and tells the peer.
-    ///
-    /// A reply keeps its quote. A message still queued behind an invitation is
-    /// only updated locally — it goes out with the new text when it's flushed.
     func editMessage(messageId: String, newText: String, in conversation: Conversation) async throws {
         guard let me = authService.currentUserId else { throw APIError.notAuthenticated }
         let text = newText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -665,6 +660,8 @@ final class MessagingService: ObservableObject {
         }
 
         let previous = textContent(for: message)
+        // A GIF message has no editable text.
+        guard previous?.gif == nil else { throw MessageEditError.notEditable }
         guard previous?.text != text else { return }
 
         let editedAt = Date()
@@ -686,11 +683,49 @@ final class MessagingService: ObservableObject {
         )
     }
 
-    /// Removes a message from this device only.
     func deleteMessageLocally(messageId: String, conversationId: String) throws {
         guard let me = authService.currentUserId else { throw APIError.notAuthenticated }
         try messageRepository.delete(messageId: messageId, ownerUserId: me)
         conversationChanged.send(conversationId)
+    }
+
+    // MARK: Reactions
+
+    /// NEW: adds, changes or (with `emoji: nil`) removes your reaction.
+    ///
+    /// Stored locally first so it shows immediately. While an invitation is
+    /// still pending the reaction stays on this device only.
+    func sendReaction(messageId: String, emoji: String?, in conversation: Conversation) async throws {
+        guard let me = authService.currentUserId else { throw APIError.notAuthenticated }
+        guard let message = try messageRepository.fetch(messageId: messageId, ownerUserId: me),
+              message.conversationId == conversation.id,
+              !message.isUndecryptable
+        else { throw ReactionError.notReactable }
+        if let emoji, !ReactionPayload.isValidEmoji(emoji) { throw ReactionError.invalidEmoji }
+
+        let now = Date()
+        try messageRepository.upsertReactionIfNewer(MessageReaction(
+            ownerUserId: me,
+            conversationId: conversation.id,
+            messageId: messageId,
+            reactorId: me,
+            emoji: emoji ?? "",
+            updatedAt: now
+        ))
+        conversationChanged.send(conversation.id)
+
+        guard relationshipState(of: conversation) == .accepted else { return }
+        try await sendControlPayload(
+            ReactionPayload(messageId: messageId, emoji: emoji, reactedAt: now),
+            kind: .reaction,
+            in: conversation,
+            createdAt: now
+        )
+    }
+
+    func reactions(in conversationId: String) -> [MessageReaction] {
+        guard let me = authService.currentUserId else { return [] }
+        return (try? messageRepository.fetchReactions(conversationId: conversationId, ownerUserId: me)) ?? []
     }
 
     // MARK: Sending — control messages
@@ -724,7 +759,6 @@ final class MessagingService: ObservableObject {
 
     // MARK: Receiving
 
-    /// Builds our side of a session from a peer's X3DH handshake.
     private func respondToHandshake(
         _ handshake: HandshakeInitPayload,
         senderId: String,
@@ -753,13 +787,6 @@ final class MessagingService: ObservableObject {
         return DoubleRatchetSession(responderRootKey: rootKey, mySignedPreKeyPair: mySignedPreKey.privateKey)
     }
 
-    /// Decrypts an envelope, establishing or rebuilding the session as needed.
-    ///
-    /// New: if we already have a session but the message doesn't decrypt with
-    /// it, AND the envelope carries a handshake, the peer has started over —
-    /// typically because they restored their account on a new phone. We rebuild
-    /// our side from their handshake instead of failing forever. If the rebuild
-    /// doesn't decrypt either, the old session is put back untouched.
     private func decryptEnvelope(_ envelope: EnvelopeDTO, myUserId: String, identity: IdentityKeyPair) async throws -> Data {
         let senderId = envelope.senderId
 
@@ -794,8 +821,6 @@ final class MessagingService: ObservableObject {
         }
         let fresh = try await respondToHandshake(handshake, senderId: senderId, myUserId: myUserId, identity: identity)
         let plaintext = try fresh.decrypt(ratchetMessage)
-        // Set only after a successful decrypt, so a bad handshake can't leave
-        // an unusable session behind.
         cryptoService.setSession(fresh, for: senderId)
         return plaintext
     }
@@ -821,7 +846,6 @@ final class MessagingService: ObservableObject {
             username: envelope.handshake?.senderUsername
         )
 
-        // Control traffic other than an invitation never creates a conversation.
         let isControl = envelope.contentType.isControlMessage
         if isControl && envelope.contentType != .invite {
             guard let existing = try conversationRepository.findDirectConversation(
@@ -846,7 +870,6 @@ final class MessagingService: ObservableObject {
             return
         }
 
-        // A chat message where we invited them means they accepted.
         if conversation.relationshipState == .invitedByMe {
             conversation.relationshipState = .accepted
             conversation.inviteRespondedAt = Date()
@@ -936,13 +959,15 @@ final class MessagingService: ObservableObject {
             guard let payload = try? decoder.decode(EditPayload.self, from: plaintext) else { return }
             try applyRemoteEdit(payload, from: envelope.senderId, conversation: conversation, myUserId: myUserId)
 
+        case .reaction:
+            guard let payload = try? decoder.decode(ReactionPayload.self, from: plaintext) else { return }
+            try applyRemoteReaction(payload, from: envelope.senderId, conversation: conversation, myUserId: myUserId)
+
         case .text, .image, .video, .file:
             break
         }
     }
 
-    /// Applies a peer's edit — only to their own text message in this
-    /// conversation, and only within the edit window.
     private func applyRemoteEdit(_ edit: EditPayload, from senderId: String, conversation: Conversation, myUserId: String) throws {
         let text = edit.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty,
@@ -951,6 +976,7 @@ final class MessagingService: ObservableObject {
               original.conversationId == conversation.id,
               original.contentType == .text,
               !original.isUndecryptable,
+              textContent(for: original)?.gif == nil,
               edit.editedAt.timeIntervalSince(original.createdAt) <= MessageEditPolicy.window + MessageEditPolicy.receiveGrace
         else {
             logger.info("Ignored an edit that didn't match a message the sender can edit")
@@ -965,6 +991,32 @@ final class MessagingService: ObservableObject {
             editedAt: edit.editedAt
         )
         conversationChanged.send(conversation.id)
+    }
+
+    /// Applies a peer's reaction — only to a message in this conversation,
+    /// only a single emoji, and only if newer than their previous reaction.
+    private func applyRemoteReaction(_ reaction: ReactionPayload, from senderId: String, conversation: Conversation, myUserId: String) throws {
+        if let emoji = reaction.emoji, !ReactionPayload.isValidEmoji(emoji) {
+            logger.info("Ignored a reaction that wasn't a single emoji")
+            return
+        }
+        guard let original = try messageRepository.fetch(messageId: reaction.messageId, ownerUserId: myUserId),
+              original.conversationId == conversation.id,
+              !original.isUndecryptable
+        else {
+            logger.info("Ignored a reaction to a message that isn't in this conversation")
+            return
+        }
+
+        let changed = try messageRepository.upsertReactionIfNewer(MessageReaction(
+            ownerUserId: myUserId,
+            conversationId: conversation.id,
+            messageId: original.id,
+            reactorId: senderId,
+            emoji: reaction.emoji ?? "",
+            updatedAt: reaction.reactedAt
+        ))
+        if changed { conversationChanged.send(conversation.id) }
     }
 
     private func makeMediaItemIfNeeded(
@@ -1076,7 +1128,6 @@ final class MessagingService: ObservableObject {
 
     // MARK: Display
 
-    /// The decoded text (and quote) of a text message, or nil for other types.
     func textContent(for message: Message) -> TextPayload? {
         guard message.contentType == .text, !message.isUndecryptable,
               let data = try? cryptoService.decryptFromStorage(message.encryptedContent)

@@ -1,11 +1,7 @@
 import SwiftUI
 import PhotosUI
 
-/// Picks a background for all chats, one chat, or the chats list.
-///
-/// The preview shows the real bars (header notch and composer) in the colour
-/// that will be derived from the background, so the user sees exactly how
-/// names and buttons will read before saving.
+/// Picks a background for all chats, one chat, or the rest of the app.
 struct AppearanceSettingsView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
@@ -23,7 +19,6 @@ struct AppearanceSettingsView: View {
         self.scope = scope
     }
 
-    /// Kept for existing call sites: `nil` = all chats.
     init(conversationId: String?) {
         self.scope = conversationId.map { .conversation($0) } ?? .allChats
     }
@@ -98,6 +93,7 @@ struct AppearanceSettingsView: View {
                 }
             }
             .navigationTitle(title)
+            .appScreenStyle()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -107,6 +103,7 @@ struct AppearanceSettingsView: View {
                     Button("Save", action: save)
                 }
             }
+            .appScreenStyle()
             .onAppear(perform: loadDraft)
             .onChange(of: selectedPhoto) { _, item in
                 guard let item else { return }
@@ -121,7 +118,7 @@ struct AppearanceSettingsView: View {
     private var title: String {
         switch scope {
         case .allChats: return "Chat Background"
-        case .chatList: return "Chats List Background"
+        case .chatList: return "App Background"
         case .conversation: return "This Chat"
         }
     }
@@ -149,7 +146,6 @@ struct AppearanceSettingsView: View {
                 .clipped()
 
             VStack(spacing: 10) {
-                // A miniature header notch, in the derived colour.
                 HStack(spacing: 8) {
                     Image(systemName: "chevron.left")
                     Circle().fill(.gray).frame(width: 24, height: 24)
@@ -198,7 +194,7 @@ struct AppearanceSettingsView: View {
                 .font(.footnote)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(isMine ? Color.accentColor : draft.incomingBubbleColor)
+                .background(isMine ? Color.brand : draft.incomingBubbleColor)
                 .foregroundStyle(isMine ? Color.white : draft.foregroundColor)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             if !isMine { Spacer() }

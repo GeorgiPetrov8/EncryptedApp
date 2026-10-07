@@ -38,6 +38,7 @@ struct NotePadView: View {
             }
             .listStyle(.plain)
             .navigationTitle("Shared Pad")
+            .appScreenStyle()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -125,7 +126,7 @@ struct NotePadView: View {
             Button(action: submit) {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.title2)
-                    .foregroundStyle(canSubmit ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(canSubmit ? Color.brand : Color.secondary)
             }
             .disabled(!canSubmit)
             .accessibilityLabel("Add item")

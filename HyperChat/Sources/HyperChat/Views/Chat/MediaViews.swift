@@ -159,7 +159,7 @@ struct ReactionBar: View {
                     .padding(.vertical, 3)
                     .background(.regularMaterial, in: Capsule())
                     .overlay(
-                        Capsule().strokeBorder(reaction.includesMe ? Color.accentColor : .clear, lineWidth: 1.5)
+                        Capsule().strokeBorder(reaction.includesMe ? Color.brand : .clear, lineWidth: 1.5)
                     )
                 }
                 .buttonStyle(.plain)

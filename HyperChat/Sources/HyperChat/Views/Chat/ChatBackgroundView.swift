@@ -59,8 +59,6 @@ extension ChatAppearance {
         }
     }
 
-    /// Full-strength colour on purpose — see `ChromeStyle`: any transparency
-    /// pushes some backgrounds below readable contrast.
     var secondaryForegroundColor: Color {
         switch background {
         case .systemDefault: return .secondary
@@ -75,8 +73,6 @@ extension ChatAppearance {
         }
     }
 
-    /// Bar colours for this background. For a photo, `imageAverage` is the
-    /// photo's average colour; what's visible is that colour under the scrim.
     func chrome(imageAverage: RGB?) -> ChromeStyle {
         switch background {
         case .systemDefault:
@@ -119,7 +115,7 @@ struct NotchStyle: ViewModifier {
     func body(content: Content) -> some View {
         content
             .foregroundStyle(chrome.foreground)
-            .tint(chrome.fill == nil ? Color.accentColor : chrome.foreground)
+            .tint(chrome.fill == nil ? Color.brand : chrome.foreground)
             .background {
                 let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 if let fill = chrome.fill {

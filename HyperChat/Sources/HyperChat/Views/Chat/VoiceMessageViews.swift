@@ -22,7 +22,7 @@ struct VoiceRecordButton: View {
     var body: some View {
         Image(systemName: recorder.isRecording ? "mic.fill" : "mic")
             .font(.title2)
-            .foregroundStyle(iconColor)
+            .foregroundStyle(iconStyle)
             .frame(width: 36, height: 36)
             .contentShape(Rectangle())
             .scaleEffect(recorder.isRecording ? 1.35 : 1.0)
@@ -44,9 +44,12 @@ struct VoiceRecordButton: View {
             }
     }
 
-    private var iconColor: Color {
-        if translation.width < cancelThreshold { return .red }
-        return recorder.isRecording ? .red : .accentColor
+    /// Red while recording; otherwise the composer's readable tint.
+    private var iconStyle: AnyShapeStyle {
+        if translation.width < cancelThreshold || recorder.isRecording {
+            return AnyShapeStyle(Color.red)
+        }
+        return AnyShapeStyle(.tint)
     }
 
     private var recordGesture: some Gesture {
@@ -87,12 +90,8 @@ struct VoiceRecordButton: View {
     private func begin() {
         switch recorder.permissionStatus {
         case .granted:
-            do {
-                try recorder.start()
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            } catch {
-                pressStartedAt = nil
-            }
+            recorder.start()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
         case .denied:
             permissionDenied = true
         default:
@@ -139,13 +138,11 @@ struct VoiceRecordingBar: View {
     }
 }
 
-/// Pulses continuously while recording, independent of the sound level —
-/// so it's always obvious the microphone is on, even in a silent room.
 private struct RecordingDot: View {
     let isPaused: Bool
 
     var body: some View {
-        TimelineView(.animation(paused: isPaused)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: isPaused)) { context in
             let phase = context.date.timeIntervalSinceReferenceDate
             let pulse = isPaused ? 0.3 : 0.55 + 0.45 * abs(sin(phase * 3))
             Circle()
@@ -156,16 +153,15 @@ private struct RecordingDot: View {
     }
 }
 
-/// FIX: draws from the recorder's rolling buffer, which is republished every
-/// 50 ms. The old version only redrew when the level *changed*, so it froze
-/// in silence. Silent samples are shown as a small "breathing" bar rather
-/// than nothing, so the waveform keeps moving.
+/// Redraws from the recorder's rolling buffer; silent samples "breathe" so
+/// the bars never freeze.
 private struct LiveWaveform: View {
     let levels: [Float]
     let isPaused: Bool
 
     var body: some View {
-        TimelineView(.animation(paused: isPaused)) { context in
+        // 30 fps is plenty for this and halves the work of a 120 Hz screen.
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: isPaused)) { context in
             let phase = context.date.timeIntervalSinceReferenceDate
             HStack(spacing: 2) {
                 ForEach(levels.indices, id: \.self) { index in
@@ -230,7 +226,8 @@ struct VoiceMessageBubble: View {
     let duration: TimeInterval
     let waveform: [Float]
     let audioData: () async -> Data?
-    var tint: Color = .accentColor
+    /// The bubble's text colour (white on your own messages).
+    var tint: Color
 
     @StateObject private var player = VoiceMessagePlayer()
 
@@ -239,11 +236,19 @@ struct VoiceMessageBubble: View {
             Button {
                 Task { await togglePlayback() }
             } label: {
-                Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 32))
-                    .foregroundStyle(tint)
+                ZStack {
+                    if player.isLoading {
+                        ProgressView().tint(tint)
+                    } else {
+                        Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(tint)
+                    }
+                }
+                .frame(width: 34, height: 34)
             }
             .buttonStyle(.plain)
+            .disabled(player.isLoading)
             .accessibilityLabel(player.isPlaying ? "Pause" : "Play voice message")
 
             VStack(alignment: .leading, spacing: 4) {
@@ -263,9 +268,14 @@ struct VoiceMessageBubble: View {
     private func togglePlayback() async {
         if player.isPlaying {
             player.pause()
-        } else if let data = await audioData() {
-            player.play(data: data)
+            return
         }
+        player.isLoading = true
+        guard let data = await audioData() else {
+            player.isLoading = false
+            return
+        }
+        await player.play(data: data)
     }
 
     private func timeString(_ interval: TimeInterval) -> String {
@@ -284,7 +294,7 @@ private struct StaticWaveform: View {
                 ForEach(samples.indices, id: \.self) { index in
                     let played = Double(index) / Double(max(samples.count - 1, 1)) <= progress
                     Capsule()
-                        .fill(played ? tint : tint.opacity(0.3))
+                        .fill(played ? tint : tint.opacity(0.35))
                         .frame(height: max(3, CGFloat(samples[index]) * geometry.size.height))
                 }
             }
@@ -296,17 +306,26 @@ private struct StaticWaveform: View {
 @MainActor
 final class VoiceMessagePlayer: NSObject, ObservableObject {
     @Published private(set) var isPlaying = false
+    @Published var isLoading = false
     @Published private(set) var progress: Double = 0
     @Published private(set) var currentTime: TimeInterval = 0
 
     private var player: AVAudioPlayer?
     private var timer: Timer?
 
-    func play(data: Data) {
+    /// FIX: the audio session switch and the decoder setup run off the main
+    /// thread (see `AudioSessionQueue`); only `play()` happens here.
+    func play(data: Data) async {
+        defer { isLoading = false }
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-            try AVAudioSession.sharedInstance().setActive(true)
-            let player = try AVAudioPlayer(data: data)
+            let player = try await AudioSessionQueue.run { () -> AVAudioPlayer in
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .spokenAudio)
+                try session.setActive(true)
+                let player = try AVAudioPlayer(data: data)
+                player.prepareToPlay()
+                return player
+            }
             player.delegate = self
             player.play()
             self.player = player
@@ -324,6 +343,7 @@ final class VoiceMessagePlayer: NSObject, ObservableObject {
     }
 
     private func startTimer() {
+        timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let player = self.player else { return }
@@ -346,7 +366,7 @@ extension VoiceMessagePlayer: AVAudioPlayerDelegate {
             self.progress = 0
             self.currentTime = 0
             self.stopTimer()
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            AudioSessionQueue.deactivate()
         }
     }
 }

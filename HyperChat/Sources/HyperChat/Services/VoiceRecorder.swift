@@ -3,6 +3,32 @@ import AVFoundation
 import Combine
 import os
 
+/// Configures the shared audio session off the main thread.
+///
+/// FIX (UI froze for a moment when recording / playing started): switching
+/// the audio session (`setCategory` + `setActive`) talks to the system audio
+/// server and can block for a few hundred milliseconds — the first time, and
+/// whenever the route changes between playback and recording. It used to run
+/// on the main thread inside the button gesture, so animations stalled as if
+/// the app was about to crash. All session work now runs on this queue.
+enum AudioSessionQueue {
+    static let queue = DispatchQueue(label: "com.hyperchat.audiosession", qos: .userInitiated)
+
+    static func run<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                continuation.resume(with: Result { try work() })
+            }
+        }
+    }
+
+    static func deactivate() {
+        queue.async {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+    }
+}
+
 /// Records voice messages: AAC/m4a, mono, 24 kHz, 32 kbps (~240 KB per minute).
 @MainActor
 final class VoiceRecorder: NSObject, ObservableObject {
@@ -12,23 +38,20 @@ final class VoiceRecorder: NSObject, ObservableObject {
     @Published private(set) var isPaused = false
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var level: Float = 0
-
-    /// FIX (waveform froze in silence): the last 24 levels, republished on
-    /// every 50 ms tick. The old view only redrew when `level` *changed* —
-    /// in silence the level stays at 0, so nothing changed and the bars froze
-    /// until a sound arrived. A new array every tick keeps them moving.
     @Published private(set) var recentLevels: [Float] = Array(repeating: 0, count: VoiceRecorder.visibleBars)
 
     static let visibleBars = 24
+    static let maxDuration: TimeInterval = 5 * 60
+    static let minDuration: TimeInterval = 0.6
 
     private var recorder: AVAudioRecorder?
     private var timer: Timer?
     private var fileURL: URL?
     private var capturedWaveform: [Float] = []
+    /// Bumped on every start/cancel, so a slow start that finishes after the
+    /// user already let go is thrown away instead of recording on its own.
+    private var generation = 0
     private let logger = Logger(subsystem: "com.HyperChat", category: "voice")
-
-    static let maxDuration: TimeInterval = 5 * 60
-    static let minDuration: TimeInterval = 0.6
 
     // MARK: Permission
 
@@ -46,35 +69,55 @@ final class VoiceRecorder: NSObject, ObservableObject {
 
     // MARK: Recording
 
-    func start() throws {
+    /// Shows the recording UI immediately; the microphone starts a moment
+    /// later, once the audio session is ready (off the main thread).
+    func start() {
         guard !isRecording else { return }
+        generation += 1
+        let token = generation
 
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetooth])
-        try session.setActive(true)
-
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 24_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 32_000,
-            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
-        ]
-
-        let recorder = try AVAudioRecorder(url: url, settings: settings)
-        recorder.isMeteringEnabled = true
-        guard recorder.record() else { throw VoiceRecorderError.couldNotStart }
-
-        self.recorder = recorder
-        self.fileURL = url
-        capturedWaveform = []
-        recentLevels = Array(repeating: 0, count: Self.visibleBars)
-        duration = 0
+        isRecording = true
         isPaused = false
         isLocked = false
-        isRecording = true
-        startMetering()
+        duration = 0
+        capturedWaveform = []
+        recentLevels = Array(repeating: 0, count: Self.visibleBars)
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-\(UUID().uuidString).m4a")
+        fileURL = url
+
+        Task {
+            do {
+                let recorder = try await AudioSessionQueue.run { () -> AVAudioRecorder in
+                    let session = AVAudioSession.sharedInstance()
+                    try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.defaultToSpeaker, .allowBluetooth])
+                    try session.setActive(true)
+                    let recorder = try AVAudioRecorder(url: url, settings: [
+                        AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+                        AVSampleRateKey: 24_000,
+                        AVNumberOfChannelsKey: 1,
+                        AVEncoderBitRateKey: 32_000,
+                        AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+                    ])
+                    recorder.isMeteringEnabled = true
+                    recorder.prepareToRecord()
+                    return recorder
+                }
+                guard token == generation, isRecording else {
+                    // Released or cancelled while the session was starting.
+                    try? FileManager.default.removeItem(at: url)
+                    return
+                }
+                guard recorder.record() else { throw VoiceRecorderError.couldNotStart }
+                self.recorder = recorder
+                if isPaused { recorder.pause() }
+                startMetering()
+            } catch {
+                logger.error("Couldn't start recording")
+                guard token == generation else { return }
+                finishSession()
+            }
+        }
     }
 
     func lock() {
@@ -83,21 +126,34 @@ final class VoiceRecorder: NSObject, ObservableObject {
     }
 
     func pause() {
-        guard isRecording, !isPaused, let recorder else { return }
-        duration = recorder.currentTime
-        recorder.pause()
+        guard isRecording, !isPaused else { return }
+        if let recorder {
+            duration = recorder.currentTime
+            recorder.pause()
+        }
         isPaused = true
         level = 0
     }
 
     func resume() {
-        guard isRecording, isPaused, let recorder, duration < Self.maxDuration else { return }
-        recorder.record()
+        guard isRecording, isPaused, duration < Self.maxDuration else { return }
+        recorder?.record()
         isPaused = false
     }
 
+    /// Stops and returns the recording, or `nil` if it was too short (or the
+    /// microphone hadn't even started yet).
     func stop() -> RecordedVoiceMessage? {
-        guard let recorder, isRecording else { return nil }
+        guard isRecording else { return nil }
+        generation += 1
+
+        guard let recorder else {
+            // Let go before the microphone was ready: nothing recorded.
+            if let fileURL { try? FileManager.default.removeItem(at: fileURL) }
+            fileURL = nil
+            finishSession()
+            return nil
+        }
 
         let recordedDuration = isPaused ? duration : max(duration, recorder.currentTime)
         recorder.stop()
@@ -109,11 +165,11 @@ final class VoiceRecorder: NSObject, ObservableObject {
             fileURL = nil
         }
         guard recordedDuration >= Self.minDuration, let data = try? Data(contentsOf: url) else { return nil }
-
         return RecordedVoiceMessage(data: data, duration: recordedDuration, waveform: capturedWaveform)
     }
 
     func cancel() {
+        generation += 1
         recorder?.stop()
         finishSession()
         if let fileURL { try? FileManager.default.removeItem(at: fileURL) }
@@ -127,12 +183,13 @@ final class VoiceRecorder: NSObject, ObservableObject {
         isRecording = false
         isLocked = false
         isPaused = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        AudioSessionQueue.deactivate()
     }
 
     // MARK: Metering
 
     private func startMetering() {
+        timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateMetering() }
         }

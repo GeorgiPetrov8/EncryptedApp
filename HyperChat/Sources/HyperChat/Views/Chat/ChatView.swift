@@ -19,6 +19,8 @@ struct ChatView: View {
     @State private var showPhotoPicker = false
     @State private var showDocumentPicker = false
     @State private var showGIFPicker = false
+    /// NEW: message the full emoji picker is open for.
+    @State private var reactionTarget: DisplayMessage?
 
     init(container: AppContainer, conversation: Conversation) {
         self.container = container
@@ -48,12 +50,7 @@ struct ChatView: View {
             .background { chatBackground }
             .environment(\.chatAppearance, appearance)
             .environment(\.chromeStyle, chrome)
-            // The chats list tints the whole navigation stack with its bar
-            // colour; inside a chat the normal accent colour applies (the
-            // notches set their own).
-            .tint(.accentColor)
             .toolbar(.hidden, for: .navigationBar)
-            // FIX: the photo picker lives here, not inside the attachment Menu.
             .photosPicker(
                 isPresented: $showPhotoPicker,
                 selection: $viewModel.selectedPhotoItem,
@@ -61,9 +58,11 @@ struct ChatView: View {
             )
             .sheet(isPresented: $showVerifyIdentity, onDismiss: { viewModel.reloadPeer() }) {
                 verifyIdentitySheet
+                    .environmentObject(container)
             }
             .sheet(isPresented: $showNotePad) {
                 NotePadView(container: container, conversation: viewModel.conversation)
+                    .environmentObject(container)
             }
             .sheet(isPresented: $showAppearanceSettings) {
                 AppearanceSettingsView(scope: .conversation(viewModel.conversation.id))
@@ -93,14 +92,17 @@ struct ChatView: View {
                 }
                 .environmentObject(container)
             }
-            // NEW: save / share a decrypted attachment.
+            .sheet(item: $reactionTarget) { message in
+                EmojiPickerView { emoji in
+                    viewModel.react(to: message, emoji: emoji)
+                }
+            }
             .sheet(item: $viewModel.sharedFile) { file in
                 ActivityView(url: file.url) {
                     viewModel.finishedWith(file)
                 }
                 .presentationDetents([.medium, .large])
             }
-            // NEW: play a video.
             .fullScreenCover(item: $viewModel.playingVideo) { file in
                 VideoPlayerScreen(url: file.url) {
                     viewModel.finishedWith(file)
@@ -116,6 +118,10 @@ struct ChatView: View {
             .onChange(of: viewModel.wasRemoved) { _, removed in
                 if removed { dismiss() }
             }
+            // FIX: outermost, so it also covers every sheet above. When it sat
+            // before the `.sheet` modifiers, sheets inherited the chats
+            // list's white tint and their buttons disappeared.
+            .tint(Color.brand)
     }
 
     // MARK: Appearance
@@ -186,7 +192,7 @@ struct ChatView: View {
             ) {
                 Button("Accept") { Task { await viewModel.acceptInvitation() } }
                     .buttonStyle(.borderedProminent)
-                    .tint(.accentColor)
+                    .tint(Color.brand)
                 Button("Decline", role: .destructive) { Task { await viewModel.declineInvitation() } }
                     .buttonStyle(.bordered)
             }
@@ -236,6 +242,7 @@ struct ChatView: View {
                                 withAnimation { proxy.scrollTo(id, anchor: .center) }
                             },
                             onReact: { emoji in viewModel.react(to: message, emoji: emoji) },
+                            onMoreReactions: { reactionTarget = message },
                             onShare: { await viewModel.shareMedia(messageId: message.id) },
                             onPlayVideo: { await viewModel.playVideo(messageId: message.id) }
                         )
@@ -243,7 +250,6 @@ struct ChatView: View {
                     }
                 }
                 .padding(.horizontal)
-                // A little more room under the header notch.
                 .padding(.top, 14)
                 .padding(.bottom, 8)
             }

@@ -295,6 +295,8 @@ final class AppContainer: ObservableObject {
             self.mediaEncryptionService.clearCache(ownerUserId: departingUserId)
             self.notePadService.clearInMemoryState()
             self.alarmService.stopForLogout()
+            self.messagingService.clearReceiveError()
+            self.callService.clearError()
         }
 
         authService.$currentUserId

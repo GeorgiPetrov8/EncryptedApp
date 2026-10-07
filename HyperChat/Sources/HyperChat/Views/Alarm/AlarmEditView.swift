@@ -199,7 +199,7 @@ private struct WeekdayPicker: View {
                     Text(symbol(for: day))
                         .font(.caption.bold())
                         .frame(width: 38, height: 38)
-                        .background(isOn ? Color.accentColor : Color(.secondarySystemBackground), in: Circle())
+                        .background(isOn ? Color.brand : Color(.secondarySystemBackground), in: Circle())
                         .foregroundStyle(isOn ? .white : .primary)
                 }
                 .buttonStyle(.plain)

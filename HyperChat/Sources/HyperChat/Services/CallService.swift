@@ -40,15 +40,12 @@ final class CallService: NSObject, ObservableObject {
     private var connectTimeoutTask: Task<Void, Never>?
     private var pendingRemoteCandidates: [IceCandidate] = []
 
-    /// NEW: screen frames from the broadcast extension.
     private let screenReceiver = ScreenShareReceiver()
 
     #if canImport(WebRTC)
     private var peerConnection: RTCPeerConnection?
     private var localAudioTrack: RTCAudioTrack?
     private var videoCapturer: RTCCameraVideoCapturer?
-    /// Kept so screen frames can be fed into the same video track as the
-    /// camera — no renegotiation needed to switch between them.
     private var localVideoSource: RTCVideoSource?
     private var screenCapturer: RTCVideoCapturer?
 
@@ -87,6 +84,10 @@ final class CallService: NSObject, ObservableObject {
     func consumeError() -> String? {
         defer { errorMessage = nil }
         return errorMessage
+    }
+
+    func clearError() {
+        errorMessage = nil
     }
 
     private var currentCallId: String? {
@@ -138,7 +139,7 @@ final class CallService: NSObject, ObservableObject {
             peerConnection = connection
             try attachLocalMedia(to: connection, video: video)
 
-            let offer = try await connection.offer(for: mediaConstraints(video: video))
+            let offer = try await connection.offer(for: mediaConstraints())
             try await connection.setLocalDescription(offer)
 
             try await sendHandler?(
@@ -178,7 +179,7 @@ final class CallService: NSObject, ObservableObject {
             try configureAudioSession(video: isVideo)
             try attachLocalMedia(to: connection, video: isVideo)
 
-            let answer = try await connection.answer(for: mediaConstraints(video: isVideo))
+            let answer = try await connection.answer(for: mediaConstraints())
             try await connection.setLocalDescription(answer)
 
             try await sendHandler?(
@@ -224,8 +225,6 @@ final class CallService: NSObject, ObservableObject {
             return
         }
         isVideoEnabled.toggle()
-        // While the screen is being shared the track carries the screen, so it
-        // stays on; the camera setting applies again when sharing stops.
         if !isScreenSharing {
             track.isEnabled = isVideoEnabled
             if isVideoEnabled { startCameraCapture() } else { await stopCameraCapture() }
@@ -237,16 +236,29 @@ final class CallService: NSObject, ObservableObject {
     // MARK: Screen sharing
 
     /// Why screen sharing can't start right now, or nil if it can.
+    ///
+    /// FIX: works in voice calls too. Every call now negotiates a video
+    /// channel from the start (switched off in voice calls), so the screen
+    /// can be sent on it without renegotiating the call. Both phones need
+    /// this version — calls started from an older version don't have that
+    /// channel.
     var screenShareUnavailableReason: String? {
+        #if targetEnvironment(simulator)
+        return "Screen sharing doesn't work in the iOS Simulator. Try it on a real iPhone."
+        #else
         if !isAvailable { return "Calling isn't available in this build." }
         if !ScreenShareCoordinator.isExtensionConfigured {
             return "Screen sharing needs the HyperChat Screen Share extension, which isn't in this build."
         }
-        if !isVideoCall { return "Screen sharing works in video calls. Start a video call to share your screen." }
+        guard case .active = phase else { return "Wait until the call connects, then share your screen." }
+        #if canImport(WebRTC)
+        if localVideoSource == nil { return "Screen sharing isn't available in this call. Hang up and call again." }
+        #endif
         return nil
+        #endif
     }
 
-    /// The broadcast itself is started from the system picker (see
+    /// The broadcast is started from the system picker (see
     /// `ScreenShareButton`); this only reports why it can't be used.
     func toggleScreenShare() async {
         if let reason = screenShareUnavailableReason { errorMessage = reason }
@@ -284,14 +296,16 @@ final class CallService: NSObject, ObservableObject {
 
     private func screenShareStateChanged(_ sharing: Bool) async {
         #if canImport(WebRTC)
-        guard isVideoCall, sharing != isScreenSharing else { return }
+        guard sharing != isScreenSharing else { return }
         isScreenSharing = sharing
         if sharing {
             await stopCameraCapture()
             localVideoTrack?.isEnabled = true
         } else {
-            localVideoTrack?.isEnabled = isVideoEnabled
-            if isVideoEnabled { startCameraCapture() }
+            // Back to how the call was: camera on/off in a video call,
+            // video channel silent in a voice call.
+            localVideoTrack?.isEnabled = isVideoCall && isVideoEnabled
+            if isVideoCall && isVideoEnabled { startCameraCapture() }
         }
         await broadcastState()
         #endif
@@ -303,7 +317,7 @@ final class CallService: NSObject, ObservableObject {
             .update(CallStateUpdate(
                 callId: callId,
                 isAudioMuted: isAudioMuted,
-                isVideoEnabled: isVideoEnabled || isScreenSharing,
+                isVideoEnabled: (isVideoCall && isVideoEnabled) || isScreenSharing,
                 isScreenSharing: isScreenSharing
             )),
             conversation
@@ -474,10 +488,12 @@ final class CallService: NSObject, ObservableObject {
             if case .ended = self.phase {
                 self.phase = .idle
                 self.activePeerId = nil
+                // FIX: an error from this call no longer shows up on the next one.
+                self.errorMessage = nil
             }
         }
 
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        AudioSessionQueue.deactivate()
     }
 
     private func startRingTimeout() {
@@ -520,11 +536,13 @@ final class CallService: NSObject, ObservableObject {
     }
 
     #if canImport(WebRTC)
-    private func mediaConstraints(video: Bool) -> RTCMediaConstraints {
+    /// Always asks for video, also in voice calls — that's what makes screen
+    /// sharing possible without renegotiation.
+    private func mediaConstraints() -> RTCMediaConstraints {
         RTCMediaConstraints(
             mandatoryConstraints: [
                 "OfferToReceiveAudio": "true",
-                "OfferToReceiveVideo": video ? "true" : "false",
+                "OfferToReceiveVideo": "true",
             ],
             optionalConstraints: nil
         )
@@ -554,15 +572,20 @@ final class CallService: NSObject, ObservableObject {
         connection.add(audioTrack, streamIds: ["stream0"])
         localAudioTrack = audioTrack
 
-        guard video else { return }
+        // A video track exists in every call. In a voice call it's switched
+        // off and no camera runs; screen sharing switches it on.
         let videoSource = Self.factory.videoSource()
-        let capturer = RTCCameraVideoCapturer(delegate: videoSource)
         let videoTrack = Self.factory.videoTrack(with: videoSource, trackId: "video0")
         connection.add(videoTrack, streamIds: ["stream0"])
         localVideoTrack = videoTrack
         localVideoSource = videoSource
-        videoCapturer = capturer
-        startCameraCapture()
+
+        if video {
+            videoCapturer = RTCCameraVideoCapturer(delegate: videoSource)
+            startCameraCapture()
+        } else {
+            videoTrack.isEnabled = false
+        }
         startScreenShareListener()
     }
 
@@ -621,8 +644,6 @@ extension CallService: RTCPeerConnectionDelegate {
                 try? AVAudioSession.sharedInstance().overrideOutputAudioPort(self.isSpeakerOn ? .speaker : .none)
             case .failed:
                 await self.endCall(reason: .failed)
-            case .disconnected:
-                break
             default:
                 break
             }
@@ -667,11 +688,6 @@ enum CallError: LocalizedError {
 }
 
 /// Finds the screen-share extension inside the app bundle.
-///
-/// FIX: the old check looked for an App Group container, which never exists
-/// for a sideloaded free-account build — so screen sharing always reported
-/// "isn't set up". The extension now talks to the app over 127.0.0.1 and
-/// needs no App Group.
 enum ScreenShareCoordinator {
     static let extensionName = "HyperChatScreenShare"
 

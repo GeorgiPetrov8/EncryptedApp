@@ -27,7 +27,7 @@ struct AppLockView: View {
         VStack(spacing: 24) {
             Image(systemName: iconName)
                 .font(.system(size: 56))
-                .foregroundStyle(state == .unavailable ? .orange : Color.accentColor)
+                .foregroundStyle(state == .unavailable ? .orange : Color.brand)
 
             Text("HyperChat is locked")
                 .font(.title2.bold())

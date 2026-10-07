@@ -76,7 +76,7 @@ private struct InvitationRow: View {
                     Text("Accept").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.accentColor)
+                .tint(Color.brand)
 
                 Button(role: .destructive) {
                     isWorking = true
@@ -170,6 +170,9 @@ struct NewInvitationView: View {
                     .disabled(username.trimmingCharacters(in: .whitespaces).isEmpty || isSending)
                 }
             }
+            // FIX: had no app background and inherited the chats list's
+            // white tint, so its buttons were invisible.
+            .appScreenStyle()
         }
     }
 

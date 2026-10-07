@@ -15,7 +15,7 @@ struct AttachmentMenu: View {
     let onPhotoLibrary: () -> Void
     let onDocument: () -> Void
     let onGIF: () -> Void
-    var tint: Color = .accentColor
+    var tint: Color = Color.brand
 
     var body: some View {
         Menu {

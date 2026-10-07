@@ -3,7 +3,6 @@ import SwiftUI
 struct MessageBubbleView: View {
     let message: DisplayMessage
     let peerIsVerified: Bool
-    /// Whether this user turned GIFs on (loads received GIFs automatically).
     var allowGIFAutoload: Bool = false
     var canReact: Bool = true
     var mediaLoader: (String) async -> Data? = { _ in nil }
@@ -12,6 +11,8 @@ struct MessageBubbleView: View {
     var onDelete: () -> Void = {}
     var onQuoteTap: (String) -> Void = { _ in }
     var onReact: (String?) -> Void = { _ in }
+    /// NEW: opens the full emoji picker.
+    var onMoreReactions: () -> Void = {}
     var onShare: () async -> Void = {}
     var onPlayVideo: () async -> Void = {}
 
@@ -21,8 +22,15 @@ struct MessageBubbleView: View {
     @State private var swipeArmed = false
 
     private let replyThreshold: CGFloat = 60
-    /// Toward the middle of the screen: right for their messages, left for yours.
     private var swipeSign: CGFloat { message.isMine ? -1 : 1 }
+
+    /// The shape iOS uses for the long-press preview.
+    ///
+    /// FIX (square box behind the bubble): without it the preview is the
+    /// view's rectangular frame drawn on the system background — visible as a
+    /// square "shadow box" on the default background, and blending in on a
+    /// custom one. With the bubble's own shape there's no box at all.
+    private static let bubbleShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
 
     var body: some View {
         HStack {
@@ -30,6 +38,7 @@ struct MessageBubbleView: View {
 
             VStack(alignment: message.isMine ? .trailing : .leading, spacing: 4) {
                 bubble
+                    .contentShape(.contextMenuPreview, Self.bubbleShape)
                     .contextMenu { contextMenu }
                 if !message.reactions.isEmpty {
                     ReactionBar(reactions: message.reactions) { reaction in
@@ -42,11 +51,6 @@ struct MessageBubbleView: View {
 
             if !message.isMine { Spacer(minLength: 40) }
         }
-        // FIX (reply icon barely visible): the hint used to sit in the bubble's
-        // background, pushed 36 pt *outside* it — for incoming messages that
-        // is off the left edge of the screen, and its colours were derived
-        // from the chat background. It now sits in the gap the swipe opens up,
-        // on a material circle that's readable on any background.
         .overlay(alignment: message.isMine ? .trailing : .leading) { replyHint }
         .simultaneousGesture(swipeToReply)
     }
@@ -80,7 +84,7 @@ struct MessageBubbleView: View {
         let progress = min(1, abs(swipeOffset) / replyThreshold)
         return Image(systemName: "arrowshape.turn.up.left.fill")
             .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(swipeArmed ? Color.accentColor : Color.primary)
+            .foregroundStyle(swipeArmed ? Color.brand : Color.primary)
             .frame(width: 34, height: 34)
             .background(.regularMaterial, in: Circle())
             .overlay(Circle().strokeBorder(Color.primary.opacity(0.15)))
@@ -105,6 +109,14 @@ struct MessageBubbleView: View {
                 }
             }
             .controlGroupStyle(.palette)
+
+            // NEW: any emoji, not only the quick ones (the palette shows as
+            // many as fit, which can be just four on smaller phones).
+            Button {
+                onMoreReactions()
+            } label: {
+                Label("Add reaction…", systemImage: "face.smiling")
+            }
         }
 
         Button {
@@ -195,7 +207,7 @@ struct MessageBubbleView: View {
                 .padding(.vertical, 8)
                 .foregroundStyle(.orange)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    Self.bubbleShape
                         .strokeBorder(.orange, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 )
         } else if let gif = message.gif {
@@ -208,9 +220,10 @@ struct MessageBubbleView: View {
                 GIFMessageView(gif: gif, autoload: allowGIFAutoload)
             }
             .background(message.replyTo == nil ? Color.clear : bubbleColor)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(Self.bubbleShape)
         } else if message.contentType == .image {
             MediaMessageView(messageId: message.id, mediaLoader: mediaLoader)
+                .clipShape(Self.bubbleShape)
         } else if message.contentType == .video {
             VideoMessageView(onPlay: onPlayVideo)
         } else if message.contentType == .file, message.mediaType == .audio {
@@ -218,10 +231,10 @@ struct MessageBubbleView: View {
                 duration: message.voiceDuration ?? 0,
                 waveform: message.voiceWaveform ?? [],
                 audioData: { await mediaLoader(message.id) },
-                tint: message.isMine ? .white : appearance.foregroundColor
+                tint: textColor
             )
             .background(bubbleColor)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(Self.bubbleShape)
         } else if message.contentType == .file {
             FileMessageView(
                 title: "Document",
@@ -245,12 +258,13 @@ struct MessageBubbleView: View {
             .padding(.vertical, 8)
             .background(bubbleColor)
             .foregroundStyle(textColor)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(Self.bubbleShape)
         }
     }
 
+    /// FIX: `.brand`, not `Color.brand` — see `Color.brand`.
     private var bubbleColor: Color {
-        message.isMine ? Color.accentColor : appearance.incomingBubbleColor
+        message.isMine ? Color.brand : appearance.incomingBubbleColor
     }
 
     private var textColor: Color {

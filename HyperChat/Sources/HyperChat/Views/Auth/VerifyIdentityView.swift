@@ -83,6 +83,7 @@ struct VerifyIdentityView: View {
                 }
             }
             .navigationTitle("Verify \(peerUsername)")
+            .appScreenStyle()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

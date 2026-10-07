@@ -78,6 +78,7 @@
 		8397939DAAE0BCE2487BFB9D /* SessionRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DE8D51D3A39D1C741521527 /* SessionRecord.swift */; };
 		86F13B8A71B77B955F1EF558 /* BackupArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CF9C242CAF42694FB8C91FD /* BackupArchive.swift */; };
 		87E652D691AD6FA894A320AB /* AESGCM.swift in Sources */ = {isa = PBXBuildFile; fileRef = 186F0578D9FAED3420D3DB52 /* AESGCM.swift */; };
+		88218E369C8323A121EB601E /* EmojiPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1279B9A8A656890760C22A3E /* EmojiPickerView.swift */; };
 		8EF6D154BB0BF47B91BA4E3B /* RecoveryAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CA7561564CD8043BD9C2816 /* RecoveryAPI.swift */; };
 		91CE2A178125FA681F2A9E54 /* Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50F28D63685AE19DD4E514CF /* Extensions.swift */; };
 		92AD5D8F9BDA03D3A57A68FD /* RealAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AFB893E4BF37253851F909 /* RealAPIClient.swift */; };
@@ -168,6 +169,7 @@
 		02FCEEEC5ED47698F6F165C1 /* AlarmService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlarmService.swift; sourceTree = "<group>"; };
 		0CA7561564CD8043BD9C2816 /* RecoveryAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryAPI.swift; sourceTree = "<group>"; };
 		11558A9186870C0484AE7887 /* WebSocketServiceProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketServiceProtocol.swift; sourceTree = "<group>"; };
+		1279B9A8A656890760C22A3E /* EmojiPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiPickerView.swift; sourceTree = "<group>"; };
 		13ADC05CA21C63D264DD1321 /* UserRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserRepository.swift; sourceTree = "<group>"; };
 		17A21557BF81FCB6A1F41C7D /* NotePadOperation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotePadOperation.swift; sourceTree = "<group>"; };
 		186F0578D9FAED3420D3DB52 /* AESGCM.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AESGCM.swift; sourceTree = "<group>"; };
@@ -452,6 +454,7 @@
 				C2DE8A90371522F45E0D7683 /* ChatBackgroundView.swift */,
 				598E2AFAB28D478D4AFD3B63 /* ChatView.swift */,
 				2779570AF778D039CCDC600D /* DecryptedMediaCache.swift */,
+				1279B9A8A656890760C22A3E /* EmojiPickerView.swift */,
 				93E5A952F65E01C74F991BEB /* GIFPickerView.swift */,
 				79D3C65300AFEE58BDFF3EDB /* MediaMessageView.swift */,
 				00BE864A95867696629FEBEC /* MediaViews.swift */,
@@ -765,6 +768,7 @@
 				5CECE224591B46AA21967A13 /* DatabaseManager.swift in Sources */,
 				1077C9DD865922DB54778355 /* DecryptedMediaCache.swift in Sources */,
 				3099EF0D5FAB5FB9E9C74BF4 /* DoubleRatchet.swift in Sources */,
+				88218E369C8323A121EB601E /* EmojiPickerView.swift in Sources */,
 				91CE2A178125FA681F2A9E54 /* Extensions.swift in Sources */,
 				6D100954CCBB334707B7A539 /* GIFPickerView.swift in Sources */,
 				E8324A0EF5A844CBA23935A0 /* HyperChatApp.swift in Sources */,

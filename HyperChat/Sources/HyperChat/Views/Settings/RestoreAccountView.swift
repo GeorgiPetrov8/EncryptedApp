@@ -47,7 +47,7 @@ struct RestoreAccountView: View {
                 }
 
                 if let errorMessage {
-                    Section { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
+                    ThemedSection { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
                 }
             }
             .navigationTitle("Restore Account")
@@ -78,7 +78,7 @@ struct RestoreAccountView: View {
     // MARK: File
 
     private var fileSection: some View {
-        Section {
+        ThemedSection {
             Button {
                 showImporter = true
             } label: {
@@ -100,7 +100,7 @@ struct RestoreAccountView: View {
 
     @ViewBuilder
     private var emailSections: some View {
-        Section {
+        ThemedSection {
             TextField("Username", text: $username)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -129,7 +129,7 @@ struct RestoreAccountView: View {
 
         if let ticket {
             if ticket.hasBackup {
-                Section {
+                ThemedSection {
                     SecureField("Backup password", text: $serverPassword)
                         .textContentType(.password)
                     Button("Restore everything") {
@@ -144,7 +144,7 @@ struct RestoreAccountView: View {
                     }
                 }
             }
-            Section {
+            ThemedSection {
                 Button(ticket.hasBackup ? "I forgot the password" : "Recover with new keys", role: .destructive) {
                     confirmNewKeys = true
                 }

@@ -11,7 +11,7 @@ struct NotificationSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            ThemedSection {
                 Toggle("Notify me via ntfy", isOn: Binding(
                     get: { service.isEnabled },
                     set: { on in
@@ -25,7 +25,7 @@ struct NotificationSettingsView: View {
             }
 
             if let topic = service.topic {
-                Section {
+                ThemedSection {
                     LabeledContent("Topic") {
                         Text(topic)
                             .font(.system(.footnote, design: .monospaced))
@@ -60,7 +60,7 @@ struct NotificationSettingsView: View {
                     }
                 }
 
-                Section {
+                ThemedSection {
                     Button("Generate a new topic", role: .destructive) {
                         confirmRegenerate = true
                     }
@@ -70,10 +70,10 @@ struct NotificationSettingsView: View {
             }
 
             if let info {
-                Section { Text(info).font(.footnote).foregroundStyle(.green) }
+                ThemedSection { Text(info).font(.footnote).foregroundStyle(.green) }
             }
             if let errorMessage {
-                Section { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
+                ThemedSection { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
             }
         }
         .navigationTitle("Notifications")

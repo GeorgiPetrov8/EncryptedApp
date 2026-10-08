@@ -9,6 +9,7 @@ import SwiftUI
 ///     clearing it are separate, discoverable actions.
 struct NotePadView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
     @StateObject private var viewModel: NotePadViewModel
     @FocusState private var addFieldFocused: Bool
 
@@ -54,6 +55,7 @@ struct NotePadView: View {
                     }
                 }
             }
+            .appScreenStyle()
             .safeAreaInset(edge: .bottom) { addItemBar }
         }
     }
@@ -69,7 +71,7 @@ struct NotePadView: View {
     @ViewBuilder
     private var outstandingSection: some View {
         if !viewModel.outstandingItems.isEmpty {
-            Section {
+            ThemedSection {
                 ForEach(viewModel.outstandingItems) { item in
                     NotePadRow(
                         item: item,
@@ -89,7 +91,7 @@ struct NotePadView: View {
     @ViewBuilder
     private var completedSection: some View {
         if !viewModel.completedItems.isEmpty {
-            Section {
+            ThemedSection {
                 ForEach(viewModel.completedItems) { item in
                     NotePadRow(
                         item: item,

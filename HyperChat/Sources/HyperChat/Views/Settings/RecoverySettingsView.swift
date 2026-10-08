@@ -30,10 +30,10 @@ struct RecoverySettingsView: View {
             explanationSection
 
             if let message {
-                Section { Text(message).font(.footnote).foregroundStyle(.green) }
+                ThemedSection { Text(message).font(.footnote).foregroundStyle(.green) }
             }
             if let errorMessage {
-                Section { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
+                ThemedSection { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
             }
         }
         .navigationTitle("Account Recovery")
@@ -52,7 +52,7 @@ struct RecoverySettingsView: View {
     // MARK: Email
 
     private var emailSection: some View {
-        Section {
+        ThemedSection {
             if let email = status?.email, !isEditingEmail {
                 LabeledContent("Email") {
                     HStack(spacing: 4) {
@@ -111,7 +111,7 @@ struct RecoverySettingsView: View {
     // MARK: Backups
 
     private var fileBackupSection: some View {
-        Section {
+        ThemedSection {
             Button {
                 passwordPurpose = .exportFile
             } label: {
@@ -130,7 +130,7 @@ struct RecoverySettingsView: View {
     }
 
     private var serverBackupSection: some View {
-        Section {
+        ThemedSection {
             if let backup = status?.backup {
                 LabeledContent("Last backup") {
                     Text(backup.updatedAt, style: .relative) + Text(" ago")
@@ -158,7 +158,7 @@ struct RecoverySettingsView: View {
     }
 
     private var explanationSection: some View {
-        Section("If you lose your phone") {
+        ThemedSection("If you lose your phone") {
             Label("Backup file + password → everything comes back.", systemImage: "checkmark.circle")
             Label("Email + server backup + password → everything comes back.", systemImage: "checkmark.circle")
             Label("Email only → you keep your username with new keys. Old messages can't be recovered and contacts see a security-key warning.", systemImage: "exclamationmark.triangle")
@@ -217,7 +217,7 @@ private struct BackupPasswordSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
+                ThemedSection {
                     SecureField("Password", text: $password)
                         .textContentType(.newPassword)
                     SecureField("Repeat password", text: $confirmation)

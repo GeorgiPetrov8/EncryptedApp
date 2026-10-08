@@ -10,7 +10,7 @@ struct AlarmListView: View {
     var body: some View {
         List {
             if !service.notificationsAuthorized {
-                Section {
+                ThemedSection {
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Notifications are off", systemImage: "bell.slash.fill")
                             .font(.headline)
@@ -27,7 +27,7 @@ struct AlarmListView: View {
                 }
             }
 
-            Section {
+            ThemedSection {
                 if service.alarms.isEmpty {
                     ContentUnavailableView(
                         "No alarms",

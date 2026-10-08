@@ -34,13 +34,19 @@ struct AlarmEditView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    DatePicker("Time", selection: $time, displayedComponents: .hourAndMinute)
-                        .datePickerStyle(.wheel)
+                ThemedSection {
+                    DatePicker(
+                        selection: $time,
+                        displayedComponents: .hourAndMinute
+                    ) {
+                        Text("Time")
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .datePickerStyle(.wheel)
                     TextField("Label", text: $label)
                 }
 
-                Section("Repeat") {
+                ThemedSection("Repeat") {
                     WeekdayPicker(selected: $repeatWeekdays)
                     if repeatWeekdays.isEmpty {
                         Text("Rings once, then switches itself off.")
@@ -49,7 +55,7 @@ struct AlarmEditView: View {
                     }
                 }
 
-                Section {
+                ThemedSection {
                     Picker("To stop it", selection: $dismissalMode) {
                         ForEach(AlarmDismissalMode.allCases, id: \.self) { mode in
                             Text(mode.title).tag(mode)
@@ -66,13 +72,13 @@ struct AlarmEditView: View {
                 }
 
                 if dismissalMode == .tasks {
-                    Section("How many problems") {
+                    ThemedSection("How many problems") {
                         Stepper("\(requiredTaskCount) problems", value: $requiredTaskCount, in: 1...10)
                     }
                 }
 
                 if dismissalMode == .messageContact {
-                    Section {
+                    ThemedSection {
                         if contacts.isEmpty {
                             Text("No contacts yet — start a conversation with someone first, then come back.")
                                 .font(.footnote)
@@ -93,11 +99,12 @@ struct AlarmEditView: View {
                     }
                 }
 
-                Section {
+                ThemedSection {
                     reliabilityNote
                 }
             }
             .navigationTitle(existing == nil ? "New Alarm" : "Edit Alarm")
+            .appScreenStyle()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

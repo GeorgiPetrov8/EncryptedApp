@@ -14,6 +14,7 @@ struct InvitationsView: View {
                     systemImage: "person.crop.circle.badge.questionmark",
                     description: Text("When someone invites you to chat, it'll appear here.")
                 )
+                .listRowBackground(container.appearanceStore.appTheme.rowFill)
             } else {
                 ForEach(service.pendingIncoming) { conversation in
                     InvitationRow(
@@ -21,6 +22,7 @@ struct InvitationsView: View {
                         onAccept: { Task { await service.accept(conversation) } },
                         onDecline: { Task { await service.decline(conversation) } }
                     )
+                    .listRowBackground(container.appearanceStore.appTheme.rowFill)
                 }
             }
         }
@@ -112,7 +114,12 @@ private struct InvitationRow: View {
     }
 }
 
-/// Composes a new invitation.
+/// "New Chat": invite someone by username.
+///
+/// FIX: uses `ThemedSection`, so rows take the notch colour and the
+/// header/footer are readable on the background. The manual
+/// `.foregroundStyle(barTint)` calls are gone — toolbar buttons ignore
+/// `foregroundStyle`; they follow the `tint` that `.appScreenStyle()` sets.
 struct NewInvitationView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
@@ -127,7 +134,7 @@ struct NewInvitationView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
+                ThemedSection {
                     TextField("Username", text: $username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -137,7 +144,7 @@ struct NewInvitationView: View {
                     Text("They'll get an invitation. Once they accept, your chat opens for both of you — anything you write before that is sent then.")
                 }
 
-                Section {
+                ThemedSection {
                     TextField("Optional note", text: $note, axis: .vertical)
                         .lineLimit(2...4)
                         .onChange(of: note) { _, newValue in
@@ -152,8 +159,10 @@ struct NewInvitationView: View {
                 }
 
                 if let errorMessage {
-                    Section {
-                        Text(errorMessage).font(.footnote).foregroundStyle(.red)
+                    ThemedSection {
+                        Text(errorMessage)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.red)
                     }
                 }
             }
@@ -165,13 +174,11 @@ struct NewInvitationView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(action: send) {
-                        if isSending { ProgressView() } else { Text("Invite") }
+                        if isSending { ProgressView() } else { Text("Invite").bold() }
                     }
                     .disabled(username.trimmingCharacters(in: .whitespaces).isEmpty || isSending)
                 }
             }
-            // FIX: had no app background and inherited the chats list's
-            // white tint, so its buttons were invisible.
             .appScreenStyle()
         }
     }

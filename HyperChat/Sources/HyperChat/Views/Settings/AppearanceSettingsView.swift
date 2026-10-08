@@ -29,12 +29,12 @@ struct AppearanceSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Preview") {
+                ThemedSection("Preview") {
                     preview
                         .listRowInsets(EdgeInsets())
                 }
 
-                Section("Background") {
+                ThemedSection("Background") {
                     Button {
                         draft.background = .systemDefault
                     } label: {
@@ -51,7 +51,7 @@ struct AppearanceSettingsView: View {
                 }
 
                 if case .solid = draft.background {
-                    Section("Colour") {
+                    ThemedSection("Colour") {
                         colorSlider("Red", value: $red, tint: .red)
                         colorSlider("Green", value: $green, tint: .green)
                         colorSlider("Blue", value: $blue, tint: .blue)
@@ -60,7 +60,7 @@ struct AppearanceSettingsView: View {
                 }
 
                 if case .image = draft.background {
-                    Section {
+                    ThemedSection {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Dimming \(Int(draft.effectiveScrimOpacity * 100))%")
                                 .font(.subheadline)
@@ -71,14 +71,14 @@ struct AppearanceSettingsView: View {
                     }
                 }
 
-                Section {
+                ThemedSection {
                     Text("The bars at the top and bottom take a colour close to the background, and their text is always picked to stay readable.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
 
                 if store.hasOverride(scope: scope) {
-                    Section {
+                    ThemedSection {
                         Button(resetTitle, role: .destructive) {
                             store.clear(scope: scope)
                             dismiss()
@@ -87,7 +87,7 @@ struct AppearanceSettingsView: View {
                 }
 
                 if let errorMessage {
-                    Section {
+                    ThemedSection {
                         Text(errorMessage).font(.footnote).foregroundStyle(.red)
                     }
                 }

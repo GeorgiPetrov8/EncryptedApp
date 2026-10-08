@@ -51,6 +51,7 @@ struct ChatView: View {
             .environment(\.chatAppearance, appearance)
             .environment(\.chromeStyle, chrome)
             .toolbar(.hidden, for: .navigationBar)
+            .appNavigationBarStyle(appearanceStore.appTheme)
             .photosPicker(
                 isPresented: $showPhotoPicker,
                 selection: $viewModel.selectedPhotoItem,

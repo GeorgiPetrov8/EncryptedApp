@@ -22,7 +22,7 @@ struct SettingsView: View {
             dangerSection
 
             if let errorMessage {
-                Section {
+                ThemedSection {
                     Text(errorMessage).foregroundStyle(.red).font(.footnote)
                 }
             }
@@ -62,7 +62,7 @@ struct SettingsView: View {
     // MARK: Profile
 
     private var profileSection: some View {
-        Section {
+        ThemedSection {
             HStack(spacing: 16) {
                 AvatarView(
                     userId: container.authService.currentUserId ?? "",
@@ -108,7 +108,7 @@ struct SettingsView: View {
     // where it was easy to miss.
 
     private var notificationsSection: some View {
-        Section {
+        ThemedSection {
             NavigationLink {
                 NotificationSettingsView()
             } label: {
@@ -129,7 +129,7 @@ struct SettingsView: View {
     // MARK: Account
 
     private var accountSection: some View {
-        Section("Account") {
+        ThemedSection("Account") {
             if let username = container.authService.currentUsername {
                 LabeledContent("Username", value: username)
             }
@@ -156,7 +156,7 @@ struct SettingsView: View {
     // MARK: Appearance
 
     private var appearanceSection: some View {
-        Section {
+        ThemedSection {
             Button {
                 appearanceScope = .chatList
             } label: {
@@ -177,7 +177,7 @@ struct SettingsView: View {
     // MARK: Privacy
 
     private var privacySection: some View {
-        Section {
+        ThemedSection {
             Toggle("Show when I'm online", isOn: Binding(
                 get: { container.presenceService.isSharingPresence },
                 set: { container.presenceService.isSharingPresence = $0 }
@@ -200,7 +200,7 @@ struct SettingsView: View {
     // MARK: Other sections
 
     private var alarmsSection: some View {
-        Section {
+        ThemedSection {
             NavigationLink {
                 AlarmListView()
             } label: {
@@ -217,7 +217,7 @@ struct SettingsView: View {
     }
 
     private var syncSection: some View {
-        Section("Sync") {
+        ThemedSection("Sync") {
             LabeledContent("Connection") {
                 Text(container.messagingService.isListening ? "Connected" : "Not connected")
                     .foregroundStyle(container.messagingService.isListening ? .green : .orange)
@@ -231,7 +231,7 @@ struct SettingsView: View {
     }
 
     private var appLockSection: some View {
-        Section("App Lock") {
+        ThemedSection("App Lock") {
             Toggle("Require Face ID / passcode", isOn: Binding(
                 get: { container.appLockService.isEnabled },
                 set: { container.appLockService.isEnabled = $0 }
@@ -250,7 +250,7 @@ struct SettingsView: View {
     }
 
     private var dangerSection: some View {
-        Section {
+        ThemedSection {
             Button("Delete Account and All Data", role: .destructive) {
                 showDeleteConfirmation = true
             }

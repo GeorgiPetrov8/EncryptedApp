@@ -18,7 +18,7 @@ struct VerifyIdentityView: View {
         NavigationStack {
             Form {
                 if identityChanged {
-                    Section {
+                    ThemedSection {
                         Label("Security keys changed", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                             .font(.headline)
@@ -35,12 +35,12 @@ struct VerifyIdentityView: View {
                     }
 
                     if let pendingSafetyNumber {
-                        Section("New safety number") {
+                        ThemedSection("New safety number") {
                             SafetyNumberGrid(value: pendingSafetyNumber)
                         }
                     }
 
-                    Section {
+                    ThemedSection {
                         Button("Accept new keys", role: .destructive) {
                             acceptChange()
                         }
@@ -48,18 +48,18 @@ struct VerifyIdentityView: View {
                         Text("Messaging stays paused until you accept.")
                     }
                 } else {
-                    Section {
+                    ThemedSection {
                         Text("Compare this number with \(peerUsername) in person or over a call. If it matches on both devices, your conversation is not being intercepted.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
 
                     if let safetyNumber {
-                        Section("Safety number") {
+                        ThemedSection("Safety number") {
                             SafetyNumberGrid(value: safetyNumber)
                         }
 
-                        Section {
+                        ThemedSection {
                             Toggle("Marked as verified", isOn: Binding(
                                 get: { isVerified },
                                 set: { setVerified($0) }
@@ -68,7 +68,7 @@ struct VerifyIdentityView: View {
                             Text("Marking as verified only changes how this contact is shown to you. It does not send anything to \(peerUsername).")
                         }
                     } else {
-                        Section {
+                        ThemedSection {
                             Text("No identity key on record for this contact yet. It will be pinned when the first message is exchanged.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
@@ -77,7 +77,7 @@ struct VerifyIdentityView: View {
                 }
 
                 if let errorMessage {
-                    Section {
+                    ThemedSection {
                         Text(errorMessage).foregroundStyle(.red).font(.footnote)
                     }
                 }

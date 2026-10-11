@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The out-of-band verification surface (Bug #2).
+/// The out-of-band verification surface.
 struct VerifyIdentityView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
@@ -20,7 +20,7 @@ struct VerifyIdentityView: View {
                 if identityChanged {
                     ThemedSection {
                         Label("Security keys changed", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
+                            .themedStatus(.error)
                             .font(.headline)
                         Text("""
                         The server presented different security keys for \(peerUsername). This happens \
@@ -31,7 +31,7 @@ struct VerifyIdentityView: View {
                         control before accepting.
                         """)
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .themedSecondary()
                     }
 
                     if let pendingSafetyNumber {
@@ -41,7 +41,7 @@ struct VerifyIdentityView: View {
                     }
 
                     ThemedSection {
-                        Button("Accept new keys", role: .destructive) {
+                        ThemedRowButton(title: "Accept new keys", isDestructive: true) {
                             acceptChange()
                         }
                     } footer: {
@@ -51,7 +51,7 @@ struct VerifyIdentityView: View {
                     ThemedSection {
                         Text("Compare this number with \(peerUsername) in person or over a call. If it matches on both devices, your conversation is not being intercepted.")
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .themedSecondary()
                     }
 
                     if let safetyNumber {
@@ -71,34 +71,31 @@ struct VerifyIdentityView: View {
                         ThemedSection {
                             Text("No identity key on record for this contact yet. It will be pinned when the first message is exchanged.")
                                 .font(.footnote)
-                                .foregroundStyle(.secondary)
+                                .themedSecondary()
                         }
                     }
                 }
 
                 if let errorMessage {
-                    ThemedSection {
-                        Text(errorMessage).foregroundStyle(.red).font(.footnote)
-                    }
+                    ThemedSection { StatusText(errorMessage, .error) }
                 }
             }
             .navigationTitle("Verify \(peerUsername)")
-            .appScreenStyle()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            .appScreenStyle()
             .onAppear(perform: load)
         }
     }
 
     private func load() {
         do {
-            // FIX: goes through `MessagingService.contact`, which scopes the lookup to
-            // the signed-in account. Reading `users` by id alone is ambiguous now that
-            // the table is keyed by `(ownerUserId, id)`.
+            // Goes through `MessagingService.contact`, which scopes the lookup to the
+            // signed-in account.
             let peer = try container.messagingService.contact(peerId)
             isVerified = peer?.isVerified ?? false
             identityChanged = peer?.hasUnacknowledgedIdentityChange ?? false
@@ -128,8 +125,8 @@ struct VerifyIdentityView: View {
     }
 }
 
-/// Renders the 12 five-digit groups in a monospaced grid, which is far easier to read
-/// aloud than a single long run of digits.
+/// Renders the 12 five-digit groups in a monospaced grid, which is far easier to
+/// read aloud than a single long run of digits.
 private struct SafetyNumberGrid: View {
     let value: String
 

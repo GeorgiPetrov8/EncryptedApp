@@ -24,7 +24,10 @@ struct AppearanceSettingsView: View {
     }
 
     private var store: AppearanceStore { container.appearanceStore }
-    private var chrome: ChromeStyle { store.chrome(for: draft) }
+
+    /// The theme the draft would produce — the same one a real chat uses, so the
+    /// preview and the result can't disagree.
+    private var previewTheme: AppTheme { store.theme(for: draft) }
 
     var body: some View {
         NavigationStack {
@@ -35,18 +38,18 @@ struct AppearanceSettingsView: View {
                 }
 
                 ThemedSection("Background") {
-                    Button {
+                    modeRow("System default", systemImage: "circle.lefthalf.filled", isSelected: isSystemDefault) {
                         draft.background = .systemDefault
-                    } label: {
-                        Label("System default", systemImage: "circle.lefthalf.filled")
                     }
-                    Button {
+                    modeRow("Solid colour", systemImage: "paintpalette", isSelected: isSolid) {
                         draft.background = .solid(red: red, green: green, blue: blue)
-                    } label: {
-                        Label("Solid colour", systemImage: "paintpalette")
                     }
                     PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                        Label("Photo", systemImage: "photo")
+                        HStack {
+                            Label("Photo", systemImage: "photo")
+                            Spacer()
+                            if isImage { Image(systemName: "checkmark") }
+                        }
                     }
                 }
 
@@ -72,14 +75,14 @@ struct AppearanceSettingsView: View {
                 }
 
                 ThemedSection {
-                    Text("The bars at the top and bottom take a colour close to the background, and their text is always picked to stay readable.")
+                    Text("Bars, rows and incoming bubbles share one colour close to the background, and every piece of text on them is picked to stay readable.")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .themedSecondary()
                 }
 
                 if store.hasOverride(scope: scope) {
                     ThemedSection {
-                        Button(resetTitle, role: .destructive) {
+                        ThemedRowButton(title: LocalizedStringKey(resetTitle), isDestructive: true) {
                             store.clear(scope: scope)
                             dismiss()
                         }
@@ -87,13 +90,10 @@ struct AppearanceSettingsView: View {
                 }
 
                 if let errorMessage {
-                    ThemedSection {
-                        Text(errorMessage).font(.footnote).foregroundStyle(.red)
-                    }
+                    ThemedSection { StatusText(errorMessage, .error) }
                 }
             }
             .navigationTitle(title)
-            .appScreenStyle()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -103,6 +103,7 @@ struct AppearanceSettingsView: View {
                     Button("Save", action: save)
                 }
             }
+            // FIX: was applied twice.
             .appScreenStyle()
             .onAppear(perform: loadDraft)
             .onChange(of: selectedPhoto) { _, item in
@@ -130,6 +131,31 @@ struct AppearanceSettingsView: View {
         }
     }
 
+    private var isSystemDefault: Bool {
+        if case .systemDefault = draft.background { return true }
+        return false
+    }
+
+    private var isSolid: Bool {
+        if case .solid = draft.background { return true }
+        return false
+    }
+
+    private var isImage: Bool {
+        if case .image = draft.background { return true }
+        return false
+    }
+
+    private func modeRow(_ title: String, systemImage: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Label(title, systemImage: systemImage)
+                Spacer()
+                if isSelected { Image(systemName: "checkmark") }
+            }
+        }
+    }
+
     private var dimmingBinding: Binding<Double> {
         Binding(
             get: { draft.effectiveScrimOpacity },
@@ -140,7 +166,8 @@ struct AppearanceSettingsView: View {
     // MARK: Preview
 
     private var preview: some View {
-        ZStack {
+        let theme = previewTheme
+        return ZStack {
             ChatBackgroundView(appearance: draft) { store.imageURL(fileName: $0) }
                 .frame(height: 240)
                 .clipped()
@@ -159,14 +186,14 @@ struct AppearanceSettingsView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .notchStyle(chrome, cornerRadius: 18)
+                .notchStyle(theme.chrome, cornerRadius: 18)
 
                 if scope == .chatList {
-                    listRow("Maria", "See you at eight")
-                    listRow("Alex", "📷 Photo")
+                    listRow("Maria", "See you at eight", theme: theme)
+                    listRow("Alex", "📷 Photo", theme: theme)
                 } else {
-                    bubble("Are we still on for tonight?", isMine: false)
-                    bubble("Yes — see you at eight.", isMine: true)
+                    bubble("Are we still on for tonight?", isMine: false, theme: theme)
+                    bubble("Yes — see you at eight.", isMine: true, theme: theme)
                 }
 
                 Spacer(minLength: 0)
@@ -174,12 +201,12 @@ struct AppearanceSettingsView: View {
                 if scope != .chatList {
                     HStack(spacing: 8) {
                         Image(systemName: "plus.circle.fill")
-                        Capsule().fill(.background).frame(height: 28)
+                        Capsule().fill(theme.fieldFill).frame(height: 28)
                         Image(systemName: "mic")
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .notchStyle(chrome, cornerRadius: 18)
+                    .notchStyle(theme.chrome, cornerRadius: 18)
                 }
             }
             .padding(12)
@@ -187,21 +214,21 @@ struct AppearanceSettingsView: View {
         .frame(height: 240)
     }
 
-    private func bubble(_ text: String, isMine: Bool) -> some View {
+    private func bubble(_ text: String, isMine: Bool, theme: AppTheme) -> some View {
         HStack {
             if isMine { Spacer() }
             Text(text)
                 .font(.footnote)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(isMine ? Color.brand : draft.incomingBubbleColor)
-                .foregroundStyle(isMine ? Color.white : draft.foregroundColor)
+                .background(isMine ? theme.accentFill : theme.incomingBubbleFill)
+                .foregroundStyle(isMine ? theme.accentText : theme.text)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             if !isMine { Spacer() }
         }
     }
 
-    private func listRow(_ name: String, _ preview: String) -> some View {
+    private func listRow(_ name: String, _ preview: String, theme: AppTheme) -> some View {
         HStack(spacing: 8) {
             Circle().fill(.gray).frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 0) {
@@ -211,25 +238,25 @@ struct AppearanceSettingsView: View {
             Spacer()
         }
         .padding(8)
-        .notchStyle(chrome, cornerRadius: 14)
+        .notchStyle(theme.chrome, cornerRadius: 14)
     }
 
     // MARK: Contrast readout
 
     private var contrastReadout: some View {
+        let theme = previewTheme
         let luminance = ContrastPolicy.relativeLuminance(red: red, green: green, blue: blue)
-        let textLuminance: Double = draft.prefersLightForeground ? 1.0 : 0.0
+        let textLuminance: Double = theme.textIsLight ? 1.0 : 0.0
         let ratio = ContrastPolicy.contrastRatio(luminanceA: luminance, luminanceB: textLuminance)
-
         return HStack {
             Image(systemName: ratio >= 4.5 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(ratio >= 4.5 ? .green : .orange)
+                .themedStatus(ratio >= 4.5 ? .success : .warning)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Text contrast \(String(format: "%.1f", ratio)):1")
                     .font(.footnote)
-                Text(draft.prefersLightForeground ? "Light text chosen automatically." : "Dark text chosen automatically.")
+                Text(theme.textIsLight ? "Light text chosen automatically." : "Dark text chosen automatically.")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .themedSecondary()
             }
         }
     }
@@ -238,7 +265,7 @@ struct AppearanceSettingsView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text("\(label) \(Int(value.wrappedValue * 255))")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .themedSecondary()
             Slider(value: value, in: 0...1).tint(tint)
         }
     }

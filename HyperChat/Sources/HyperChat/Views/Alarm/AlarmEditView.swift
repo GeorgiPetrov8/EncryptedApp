@@ -43,6 +43,7 @@ struct AlarmEditView: View {
                             .fixedSize(horizontal: true, vertical: false)
                     }
                     .datePickerStyle(.wheel)
+
                     TextField("Label", text: $label)
                 }
 
@@ -51,7 +52,7 @@ struct AlarmEditView: View {
                     if repeatWeekdays.isEmpty {
                         Text("Rings once, then switches itself off.")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .themedSecondary()
                     }
                 }
 
@@ -66,7 +67,7 @@ struct AlarmEditView: View {
 
                     Text(dismissalMode.explanation)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .themedSecondary()
                 } header: {
                     Text("Dismissal")
                 }
@@ -82,7 +83,7 @@ struct AlarmEditView: View {
                         if contacts.isEmpty {
                             Text("No contacts yet — start a conversation with someone first, then come back.")
                                 .font(.footnote)
-                                .foregroundStyle(.secondary)
+                                .themedSecondary()
                         } else {
                             Picker("Contact", selection: $accountabilityPeerId) {
                                 Text("Choose…").tag(String?.none)
@@ -104,7 +105,6 @@ struct AlarmEditView: View {
                 }
             }
             .navigationTitle(existing == nil ? "New Alarm" : "Edit Alarm")
-            .appScreenStyle()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -115,17 +115,15 @@ struct AlarmEditView: View {
                         .disabled(!canSave)
                 }
             }
+            .appScreenStyle()
             .onAppear(perform: loadContacts)
         }
     }
 
     /// Stated up front rather than discovered by oversleeping.
     ///
-    /// iOS gives third-party apps no true alarm API — only the Clock app
-    /// can override Do Not Disturb and the mute switch. Pretending
-    /// otherwise would be the single most harmful thing this screen could
-    /// do, so the constraint is spelled out where someone is deciding
-    /// whether to rely on it.
+    /// iOS gives third-party apps no true alarm API — only the Clock app can
+    /// override Do Not Disturb and the mute switch.
     private var reliabilityNote: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Before you rely on this", systemImage: "info.circle")
@@ -137,7 +135,7 @@ struct AlarmEditView: View {
                 Keep the Clock alarm as a backup for anything you can't miss.
                 """)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .themedSecondary()
         }
     }
 
@@ -151,8 +149,8 @@ struct AlarmEditView: View {
     private func loadContacts() {
         guard let ownerUserId = container.authService.currentUserId else { return }
         let all = (try? container.userRepository.fetchAll(ownerUserId: ownerUserId)) ?? []
-        // Exclude the self-row: messaging yourself proves nothing about
-        // being awake to anyone else, which is the entire point of the mode.
+        // Exclude the self-row: messaging yourself proves nothing about being awake
+        // to anyone else, which is the entire point of the mode.
         contacts = all
             .filter { $0.id != ownerUserId }
             .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
@@ -176,8 +174,7 @@ struct AlarmEditView: View {
         alarm.requiredTaskCount = requiredTaskCount
         alarm.isEnabled = true
         // Editing an alarm clears any stale fired/dismissed pair, so a
-        // previously-expired alarm doesn't immediately look "still ringing"
-        // to the resume check on next launch.
+        // previously-expired alarm doesn't immediately look "still ringing".
         alarm.lastFiredAt = nil
         alarm.lastDismissedAt = nil
 
@@ -188,12 +185,15 @@ struct AlarmEditView: View {
     }
 }
 
+/// FIX: a selected day was `Color.brand` on the row, and an unselected one a
+/// system grey — a blue circle on a blue row. Selected now uses the theme's accent
+/// (which is inverted when blue wouldn't stand out), unselected the field fill.
 private struct WeekdayPicker: View {
     @Binding var selected: Set<Int>
+    @Environment(\.appTheme) private var theme
 
     /// 1 = Sunday … 7 = Saturday, matching `Calendar.weekday` and
-    /// `DateComponents.weekday` — see `Alarm.repeatWeekdays` for why no
-    /// conversion happens anywhere.
+    /// `DateComponents.weekday`.
     private let weekdays = Array(1...7)
 
     var body: some View {
@@ -206,10 +206,12 @@ private struct WeekdayPicker: View {
                     Text(symbol(for: day))
                         .font(.caption.bold())
                         .frame(width: 38, height: 38)
-                        .background(isOn ? Color.brand : Color(.secondarySystemBackground), in: Circle())
-                        .foregroundStyle(isOn ? .white : .primary)
+                        .background(isOn ? theme.accentFill : theme.fieldFill, in: Circle())
+                        .foregroundStyle(isOn ? theme.accentText : theme.text)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(Calendar.current.weekdaySymbols[day - 1])
+                .accessibilityAddTraits(isOn ? .isSelected : [])
             }
         }
         .frame(maxWidth: .infinity)

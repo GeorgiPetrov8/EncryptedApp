@@ -3,14 +3,12 @@ import SwiftUI
 /// Settings → Account recovery: recovery email, backup file, server backup.
 struct RecoverySettingsView: View {
     @EnvironmentObject private var container: AppContainer
-
     @State private var emailDraft = ""
     @State private var code = ""
     @State private var isEditingEmail = false
     @State private var isWorking = false
     @State private var message: String?
     @State private var errorMessage: String?
-
     @State private var passwordPurpose: PasswordPurpose?
     @State private var exportedFile: URL?
 
@@ -30,10 +28,10 @@ struct RecoverySettingsView: View {
             explanationSection
 
             if let message {
-                ThemedSection { Text(message).font(.footnote).foregroundStyle(.green) }
+                ThemedSection { StatusText(message, .success) }
             }
             if let errorMessage {
-                ThemedSection { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
+                ThemedSection { StatusText(errorMessage, .error) }
             }
         }
         .navigationTitle("Account Recovery")
@@ -46,6 +44,7 @@ struct RecoverySettingsView: View {
                 passwordPurpose = nil
                 Task { await runBackup(purpose, password: password) }
             }
+            .environmentObject(container)
         }
     }
 
@@ -58,7 +57,8 @@ struct RecoverySettingsView: View {
                     HStack(spacing: 4) {
                         Text(email)
                         if status?.verified == true {
-                            Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                            Image(systemName: "checkmark.seal.fill")
+                                .themedStatus(.success)
                         }
                     }
                 }
@@ -66,7 +66,7 @@ struct RecoverySettingsView: View {
                     emailDraft = email
                     isEditingEmail = true
                 }
-                Button("Remove email", role: .destructive) {
+                ThemedRowButton(title: "Remove email", isDestructive: true) {
                     perform { try await service.removeEmail() }
                 }
             } else {
@@ -144,7 +144,7 @@ struct RecoverySettingsView: View {
             }
             .disabled(status?.verified != true)
             if status?.backup != nil {
-                Button("Delete server backup", role: .destructive) {
+                ThemedRowButton(title: "Delete server backup", isDestructive: true) {
                     perform { try await service.deleteServerBackup() }
                 }
             }
@@ -202,6 +202,9 @@ struct RecoverySettingsView: View {
 }
 
 /// Asks for a backup password twice. It's never stored.
+///
+/// FIX: it was a plain system sheet in the middle of a themed app. It now takes
+/// the app theme like every other screen.
 private struct BackupPasswordSheet: View {
     let purpose: RecoverySettingsView.PasswordPurpose
     let onConfirm: (String) -> Void
@@ -226,7 +229,8 @@ private struct BackupPasswordSheet: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("At least \(BackupArchive.minimumPasswordLength) characters.")
                         if !confirmation.isEmpty && password != confirmation {
-                            Text("The passwords don't match.").foregroundStyle(.red)
+                            Label("The passwords don't match.", systemImage: "exclamationmark.triangle.fill")
+                                .fontWeight(.semibold)
                         }
                         Text("Write it down. If you forget it, this backup can't be opened by anyone.")
                             .bold()
@@ -244,6 +248,7 @@ private struct BackupPasswordSheet: View {
                         .disabled(!isValid)
                 }
             }
+            .appScreenStyle()
         }
     }
 }

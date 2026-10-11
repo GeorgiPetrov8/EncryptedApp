@@ -1,25 +1,23 @@
 import SwiftUI
 
-/// The delivery/read indicator on an outgoing message (feature #3).
+/// The delivery/read indicator on an outgoing message.
 ///
-/// Follows the convention people already know from WhatsApp, because a novel
-/// visual language for a familiar concept is a cost with no benefit:
+///   - clock      — queued, not yet handed to the server
+///   - one tick   — the server accepted it
+///   - two ticks  — it reached their device
+///   - two ticks, heavy and tinted — they opened the conversation
 ///
-///   - clock        — queued, not yet handed to the server
-///   - one tick     — the server accepted it
-///   - two ticks    — it reached their device
-///   - two ticks, tinted — they opened the conversation
-///
-/// Shown only on your own messages. On incoming ones it would be meaningless
-/// (you obviously received it) and would clutter the row.
+/// "Read" is told apart from "delivered" by **weight as well as colour**: the
+/// old version used blue alone, which disappears on a blue background and fails
+/// for colour-blind users.
 struct MessageStatusView: View {
     let status: DeliveryStatus
     let deliveredAt: Date?
     let readAt: Date?
-
-    /// Passed in rather than read from the environment so this view can be
-    /// previewed and tested against a custom background without a container.
+    /// Colour of the unread states — the text colour on the background.
     var tint: Color = .secondary
+    /// Colour of the "read" ticks (see `AppTheme.readTick`).
+    var readTint: Color = .blue
 
     var body: some View {
         Group {
@@ -29,9 +27,9 @@ struct MessageStatusView: View {
             case .sent:
                 Image(systemName: "checkmark")
             case .delivered:
-                doubleCheck(tinted: false)
+                doubleCheck
             case .read:
-                doubleCheck(tinted: true)
+                doubleCheck.fontWeight(.heavy)
             case .failed:
                 Image(systemName: "exclamationmark.triangle")
             case .undecryptable:
@@ -43,25 +41,16 @@ struct MessageStatusView: View {
         .accessibilityLabel(accessibilityLabel)
     }
 
-    /// The timestamps take precedence over the stored status.
-    ///
-    /// They can disagree: a receipt may arrive before the send path has
-    /// finished writing `.sent`, in which case the row says `.sending` while
-    /// `deliveredAt` is already set. Trusting the more advanced of the two
-    /// avoids a tick briefly going backwards, which reads as a glitch.
+    /// The timestamps take precedence over the stored status: a receipt can
+    /// arrive before the send path has written `.sent`, and a tick must not go
+    /// backwards.
     private var resolved: DeliveryStatus {
         if readAt != nil { return .read }
         if deliveredAt != nil { return .delivered }
         return status
     }
 
-    /// Two overlapping checkmarks rather than a single glyph.
-    ///
-    /// `checkmark.circle.fill` was the old stand-in, but it reads as
-    /// "completed" rather than "delivered", and gave no way to distinguish
-    /// delivered from read without a colour change alone — which fails for
-    /// colour-blind users and against a custom background.
-    private func doubleCheck(tinted: Bool) -> some View {
+    private var doubleCheck: some View {
         HStack(spacing: -3) {
             Image(systemName: "checkmark")
             Image(systemName: "checkmark")
@@ -70,14 +59,12 @@ struct MessageStatusView: View {
 
     private var foregroundStyle: Color {
         switch resolved {
-        case .read: return .blue
+        case .read: return readTint
         case .failed, .undecryptable: return .orange
         default: return tint
         }
     }
 
-    /// Spelled out for VoiceOver: the tick count is a purely visual
-    /// distinction that doesn't survive being read aloud.
     private var accessibilityLabel: String {
         switch resolved {
         case .sending: return "Sending"
@@ -89,19 +76,3 @@ struct MessageStatusView: View {
         }
     }
 }
-
-// NOTE: `DeliveryStatus` already declares `.delivered` and `.read`, so this
-// file adds no cases to it.
-//
-// Those two are treated as *derived* states: nothing writes them into
-// `messages.deliveryStatus`. The send path only ever sets `.sending`, `.sent`
-// or `.failed`; receipts are recorded as the `deliveredAt` / `readAt`
-// timestamp columns added in migration v9, and `resolved` above reads the
-// status back out of them at render time.
-//
-// The reason for that split is ordering. Receipts arrive over the same
-// at-least-once, out-of-order channel as messages, so a `delivered` receipt
-// can land after a `read` one. If both wrote to a single status column, the
-// later-arriving `delivered` would overwrite `read` and the ticks would go
-// backwards. Timestamps are monotonic per kind and `resolved` takes the most
-// advanced of the two, so arrival order stops mattering.

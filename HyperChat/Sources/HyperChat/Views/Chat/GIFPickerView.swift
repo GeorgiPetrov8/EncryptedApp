@@ -1,6 +1,9 @@
 import SwiftUI
 
 /// GIF search (KLIPY / GIPHY).
+///
+/// FIX: it was a plain system sheet — grey `.secondary` text, `.tint` icons and a
+/// system-grey search field. It now follows the app theme.
 struct GIFPickerView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
@@ -10,6 +13,7 @@ struct GIFPickerView: View {
     let onPicked: (GIFAttachment) -> Void
 
     private var service: GIFService { container.tenorService }
+    private var theme: AppTheme { container.appearanceStore.appTheme }
 
     var body: some View {
         NavigationStack {
@@ -17,10 +21,11 @@ struct GIFPickerView: View {
                 if !service.isEnabled {
                     consentGate
                 } else if !service.isConfigured {
-                    ContentUnavailableView(
-                        "GIF search isn't set up",
+                    ThemedEmptyState(
+                        title: "GIF search isn't set up",
                         systemImage: "wrench.and.screwdriver",
-                        description: Text("This build has no GIF_API_KEY. Get a free key at partner.klipy.com and add it to Info.plist.")
+                        description: "This build has no GIF_API_KEY. Get a free key at partner.klipy.com and add it to Info.plist.",
+                        placement: .background
                     )
                 } else {
                     grid
@@ -33,6 +38,7 @@ struct GIFPickerView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
+            .appScreenStyle()
         }
     }
 
@@ -40,10 +46,10 @@ struct GIFPickerView: View {
         VStack(spacing: 18) {
             Image(systemName: "hand.raised.fill")
                 .font(.system(size: 44))
-                .foregroundStyle(.tint)
-
+                .foregroundStyle(theme.tint)
             Text("GIFs come from \(service.providerName)")
                 .font(.headline)
+                .foregroundStyle(theme.isCustom ? theme.backgroundText : Color.primary)
 
             VStack(alignment: .leading, spacing: 10) {
                 Label("Your search terms go to \(service.providerName).", systemImage: "magnifyingglass")
@@ -51,18 +57,18 @@ struct GIFPickerView: View {
                 Label("The GIF link is sent end-to-end encrypted. The other person's phone loads it from \(service.providerName) — automatically only if they turned GIFs on, otherwise after they tap it.", systemImage: "lock.fill")
             }
             .font(.footnote)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(theme.onBackground)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Button("Turn on GIFs") {
                 service.isEnabled = true
                 service.search("")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.themedProminent)
 
             Text("You can turn this off again in Settings → Privacy.")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.onBackground)
         }
         .padding(28)
     }
@@ -72,9 +78,7 @@ struct GIFPickerView: View {
             searchField
 
             if let error = service.errorMessage {
-                Text(error)
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
+                StatusText(error, .warning)
                     .padding()
             }
 
@@ -104,7 +108,7 @@ struct GIFPickerView: View {
             // Required attribution.
             Text("Powered by \(service.providerName)")
                 .font(.caption2.bold())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.onBackground)
                 .padding(.vertical, 6)
         }
         .task {
@@ -114,7 +118,7 @@ struct GIFPickerView: View {
 
     private var searchField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            Image(systemName: "magnifyingglass")
             TextField("Search \(service.providerName)", text: $query)
                 .textFieldStyle(.plain)
                 .autocorrectionDisabled()
@@ -124,12 +128,11 @@ struct GIFPickerView: View {
                     query = ""
                     service.search("")
                 } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    Image(systemName: "xmark.circle.fill")
                 }
             }
         }
-        .padding(10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+        .themedField()
         .padding(.horizontal)
         .padding(.vertical, 8)
     }

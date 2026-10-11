@@ -2,6 +2,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Signed-out screen for getting an account back on a new phone.
+///
+/// FIX: it used `ThemedSection` but never `.appScreenStyle()`, so the sections fell
+/// back to the system look while the rest of the app was themed.
 struct RestoreAccountView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
@@ -47,7 +50,7 @@ struct RestoreAccountView: View {
                 }
 
                 if let errorMessage {
-                    ThemedSection { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
+                    ThemedSection { StatusText(errorMessage, .error) }
                 }
             }
             .navigationTitle("Restore Account")
@@ -57,8 +60,15 @@ struct RestoreAccountView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
+            .appScreenStyle()
             .disabled(isWorking)
-            .overlay { if isWorking { ProgressView("Restoring…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) } }
+            .overlay {
+                if isWorking {
+                    ProgressView("Restoring…")
+                        .padding()
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data, .item]) { result in
                 if case .success(let url) = result { pickedFile = url }
             }
@@ -112,6 +122,7 @@ struct RestoreAccountView: View {
                 }
             }
             .disabled(username.isEmpty || ticket != nil)
+
             if codeSent && ticket == nil {
                 TextField("6-digit code", text: $code)
                     .keyboardType(.numberPad)
@@ -144,8 +155,12 @@ struct RestoreAccountView: View {
                     }
                 }
             }
+
             ThemedSection {
-                Button(ticket.hasBackup ? "I forgot the password" : "Recover with new keys", role: .destructive) {
+                ThemedRowButton(
+                    title: ticket.hasBackup ? "I forgot the password" : "Recover with new keys",
+                    isDestructive: true
+                ) {
                     confirmNewKeys = true
                 }
             } footer: {

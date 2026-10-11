@@ -119,6 +119,7 @@
 		D496B0EA410C89F16E924C87 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 234DBED302DE3BE840BB879B /* AppDelegate.swift */; };
 		D5286E799E88CD719FEF711E /* CallService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 359CCF43A139BC8E3344EA11 /* CallService.swift */; };
 		E0D2911D71429972F080CD18 /* RecoveryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A89DE00E85E19DCAADBBD3B6 /* RecoveryService.swift */; };
+		E4FB4ADC291EDB7B22B3495C /* AppTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C4F422036C543F37E7B547F /* AppTheme.swift */; };
 		E5E3C9EB251A09E5E0981BF7 /* CompositeKeyFixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46D1EAA34E24C3AFB1C059CB /* CompositeKeyFixTests.swift */; };
 		E8324A0EF5A844CBA23935A0 /* HyperChatApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6195BA151EDC97041CDFFD /* HyperChatApp.swift */; };
 		EAAB2DE0E7F5D2A08E45D6F3 /* Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = 793A1DE6067ABAE1FA8ED1A3 /* Message.swift */; };
@@ -196,6 +197,7 @@
 		45B249A03E7BCC9B22D3BD99 /* NotePadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotePadView.swift; sourceTree = "<group>"; };
 		46D1EAA34E24C3AFB1C059CB /* CompositeKeyFixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositeKeyFixTests.swift; sourceTree = "<group>"; };
 		4B901E28328DCBF4C5810123 /* AppContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppContainer.swift; sourceTree = "<group>"; };
+		4C4F422036C543F37E7B547F /* AppTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTheme.swift; sourceTree = "<group>"; };
 		50F28D63685AE19DD4E514CF /* Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extensions.swift; sourceTree = "<group>"; };
 		535BB4D956C269459D36F792 /* APIClientProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientProtocol.swift; sourceTree = "<group>"; };
 		53B1F7B5BCD23CF8D9D869EC /* AppLockService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockService.swift; sourceTree = "<group>"; };
@@ -448,6 +450,7 @@
 			isa = PBXGroup;
 			children = (
 				CD7F1B6CC98C2A42A190525C /* AppScreenStyle.swift */,
+				4C4F422036C543F37E7B547F /* AppTheme.swift */,
 				FFB92DDB7E8E9A5A5628CFB7 /* AttachmentMenu.swift */,
 				9678F96A97DBC7DC80356A38 /* AvatarView.swift */,
 				74E7FF495A344C6CCB4DF194 /* CallView.swift */,
@@ -741,6 +744,7 @@
 				52785F593B93D76009AD0094 /* AppLockService.swift in Sources */,
 				BFDE01EFC6852AFFEC5AC9DF /* AppLockView.swift in Sources */,
 				FBD7FFAB0DEAFD20A24498BD /* AppScreenStyle.swift in Sources */,
+				E4FB4ADC291EDB7B22B3495C /* AppTheme.swift in Sources */,
 				0C20FEBF9A2021D6BF43F86D /* AppearanceSettingsView.swift in Sources */,
 				FDBC3726D08772B25C12E339 /* AppearanceStore.swift in Sources */,
 				51F5DB5B532D529FC90ECD07 /* AttachmentMenu.swift in Sources */,

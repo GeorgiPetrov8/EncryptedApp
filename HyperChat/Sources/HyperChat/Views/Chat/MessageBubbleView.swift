@@ -1,5 +1,15 @@
 import SwiftUI
 
+/// One message in a chat.
+///
+/// Colours come from the chat's `AppTheme` (set by `ChatView`):
+///   - incoming bubble   = the surface colour, text colour chosen against it;
+///   - outgoing bubble   = the accent (the app's blue, or its inverse when blue
+///                          would blend into the background);
+///   - time and ticks    = the text colour on the background.
+/// Previously the incoming text colour was judged against the *background* while
+/// the bubble was a semi-transparent overlay, so it could fall below readable
+/// contrast on mid-tone backgrounds.
 struct MessageBubbleView: View {
     let message: DisplayMessage
     let peerIsVerified: Bool
@@ -11,12 +21,12 @@ struct MessageBubbleView: View {
     var onDelete: () -> Void = {}
     var onQuoteTap: (String) -> Void = { _ in }
     var onReact: (String?) -> Void = { _ in }
-    /// NEW: opens the full emoji picker.
+    /// Opens the full emoji picker.
     var onMoreReactions: () -> Void = {}
     var onShare: () async -> Void = {}
     var onPlayVideo: () async -> Void = {}
 
-    @Environment(\.chatAppearance) private var appearance
+    @Environment(\.appTheme) private var theme
 
     @State private var swipeOffset: CGFloat = 0
     @State private var swipeArmed = false
@@ -24,12 +34,8 @@ struct MessageBubbleView: View {
     private let replyThreshold: CGFloat = 60
     private var swipeSign: CGFloat { message.isMine ? -1 : 1 }
 
-    /// The shape iOS uses for the long-press preview.
-    ///
-    /// FIX (square box behind the bubble): without it the preview is the
-    /// view's rectangular frame drawn on the system background — visible as a
-    /// square "shadow box" on the default background, and blending in on a
-    /// custom one. With the bubble's own shape there's no box at all.
+    /// The shape iOS uses for the long-press preview — without it the preview is
+    /// the view's square frame, visible as a "shadow box" on the default background.
     private static let bubbleShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
 
     var body: some View {
@@ -40,11 +46,13 @@ struct MessageBubbleView: View {
                 bubble
                     .contentShape(.contextMenuPreview, Self.bubbleShape)
                     .contextMenu { contextMenu }
+
                 if !message.reactions.isEmpty {
                     ReactionBar(reactions: message.reactions) { reaction in
                         onReact(reaction.includesMe ? nil : reaction.emoji)
                     }
                 }
+
                 footer
             }
             .offset(x: swipeOffset)
@@ -84,16 +92,25 @@ struct MessageBubbleView: View {
         let progress = min(1, abs(swipeOffset) / replyThreshold)
         return Image(systemName: "arrowshape.turn.up.left.fill")
             .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(swipeArmed ? Color.brand : Color.primary)
+            .foregroundStyle(swipeArmed ? (theme.isCustom ? theme.accentFill : Color.brand) : theme.text)
             .frame(width: 34, height: 34)
-            .background(.regularMaterial, in: Circle())
-            .overlay(Circle().strokeBorder(Color.primary.opacity(0.15)))
+            .background { replyHintBackground }
+            .overlay(Circle().strokeBorder(theme.text.opacity(0.2)))
             .shadow(color: .black.opacity(0.25), radius: 4, y: 1)
             .scaleEffect(swipeArmed ? 1.1 : 0.6 + 0.4 * progress)
             .opacity(progress)
             .padding(.horizontal, 4)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var replyHintBackground: some View {
+        if let surface = theme.surface {
+            Circle().fill(surface)
+        } else {
+            Circle().fill(.regularMaterial)
+        }
     }
 
     // MARK: Long-press menu
@@ -110,8 +127,7 @@ struct MessageBubbleView: View {
             }
             .controlGroupStyle(.palette)
 
-            // NEW: any emoji, not only the quick ones (the palette shows as
-            // many as fit, which can be just four on smaller phones).
+            // Any emoji, not only the quick ones.
             Button {
                 onMoreReactions()
             } label: {
@@ -124,6 +140,7 @@ struct MessageBubbleView: View {
         } label: {
             Label("Reply", systemImage: "arrowshape.turn.up.left")
         }
+
         if let copyText = message.copyText {
             Button {
                 UIPasteboard.general.string = copyText
@@ -131,6 +148,7 @@ struct MessageBubbleView: View {
                 Label("Copy", systemImage: "doc.on.doc")
             }
         }
+
         if message.isMediaAttachment {
             Button {
                 Task { await onShare() }
@@ -138,6 +156,7 @@ struct MessageBubbleView: View {
                 Label(saveLabel, systemImage: "square.and.arrow.down")
             }
         }
+
         if message.canEdit {
             Button {
                 onEdit()
@@ -145,6 +164,7 @@ struct MessageBubbleView: View {
                 Label("Edit", systemImage: "pencil")
             }
         }
+
         if message.myReaction != nil {
             Button {
                 onReact(nil)
@@ -152,6 +172,7 @@ struct MessageBubbleView: View {
                 Label("Remove reaction", systemImage: "face.dashed")
             }
         }
+
         Button(role: .destructive) {
             onDelete()
         } label: {
@@ -185,14 +206,21 @@ struct MessageBubbleView: View {
                     status: message.status,
                     deliveredAt: message.deliveredAt,
                     readAt: message.readAt,
-                    tint: appearance.secondaryForegroundColor
+                    tint: theme.onBackground,
+                    readTint: theme.readTick
                 )
             } else if message.status == .undecryptable {
                 Image(systemName: "exclamationmark.octagon")
                     .font(.caption2)
             }
         }
-        .foregroundStyle(message.status == .undecryptable ? Color.orange : appearance.secondaryForegroundColor)
+        .foregroundStyle(message.status == .undecryptable ? warningColor : theme.onBackground)
+    }
+
+    /// Orange on the default look; the text colour (with the existing icon and
+    /// dashed outline) on a custom background, where orange isn't reliably readable.
+    private var warningColor: Color {
+        theme.isCustom ? theme.backgroundText : Color.orange
     }
 
     // MARK: Bubble
@@ -201,14 +229,14 @@ struct MessageBubbleView: View {
     private var bubble: some View {
         if message.status == .undecryptable {
             Text(message.text)
-                .font(.footnote)
+                .font(.footnote.weight(theme.isCustom ? .semibold : .regular))
                 .italic()
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .foregroundStyle(.orange)
+                .foregroundStyle(warningColor)
                 .overlay(
                     Self.bubbleShape
-                        .strokeBorder(.orange, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        .strokeBorder(warningColor, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 )
         } else if let gif = message.gif {
             VStack(alignment: .leading, spacing: 6) {
@@ -262,13 +290,12 @@ struct MessageBubbleView: View {
         }
     }
 
-    /// FIX: `.brand`, not `Color.brand` — see `Color.brand`.
     private var bubbleColor: Color {
-        message.isMine ? Color.brand : appearance.incomingBubbleColor
+        message.isMine ? theme.accentFill : theme.incomingBubbleFill
     }
 
     private var textColor: Color {
-        message.isMine ? Color.white : appearance.foregroundColor
+        message.isMine ? theme.accentText : theme.text
     }
 
     private var lockIcon: String {

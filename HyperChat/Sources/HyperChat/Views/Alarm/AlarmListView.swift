@@ -14,14 +14,14 @@ struct AlarmListView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Notifications are off", systemImage: "bell.slash.fill")
                             .font(.headline)
-                            .foregroundStyle(.orange)
+                            .themedStatus(.warning)
                         Text("Alarms can't ring without notification permission.")
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .themedSecondary()
                         Button("Allow notifications") {
                             Task { await service.requestNotificationPermission() }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.themedProminent)
                     }
                     .padding(.vertical, 4)
                 }
@@ -29,10 +29,10 @@ struct AlarmListView: View {
 
             ThemedSection {
                 if service.alarms.isEmpty {
-                    ContentUnavailableView(
-                        "No alarms",
+                    ThemedEmptyState(
+                        title: "No alarms",
                         systemImage: "alarm",
-                        description: Text("Add one that won't let you snooze your way out of it.")
+                        description: "Add one that won't let you snooze your way out of it."
                     )
                 } else {
                     ForEach(service.alarms) { alarm in
@@ -50,10 +50,8 @@ struct AlarmListView: View {
                     }
                 }
             } footer: {
-                // Surfaced rather than hidden: iOS caps pending local
-                // notifications at 64 and silently drops the overflow, so
-                // an unexplained "my sixth alarm never rang" is exactly the
-                // kind of bug that erodes trust in an alarm app.
+                // Surfaced rather than hidden: iOS caps pending local notifications
+                // at 64 and silently drops the overflow.
                 Text("Up to \(AlarmScheduler.maxEnabledAlarms) alarms can be active at once — that's the limit of what iOS will reliably schedule.")
             }
         }
@@ -72,9 +70,11 @@ struct AlarmListView: View {
         }
         .sheet(isPresented: $isCreating) {
             AlarmEditView(container: container, alarm: nil)
+                .environmentObject(container)
         }
         .sheet(item: $editing) { alarm in
             AlarmEditView(container: container, alarm: alarm)
+                .environmentObject(container)
         }
         .task { await service.activate() }
     }
@@ -84,13 +84,17 @@ private struct AlarmRow: View {
     let alarm: Alarm
     let onToggle: () -> Void
 
+    @Environment(\.appTheme) private var theme
+
     var body: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
+                // An off alarm is shown thinner, not greyer: grey text drops below
+                // readable contrast on a coloured row, and the switch already says "off".
                 Text(alarm.formattedTime)
-                    .font(.system(size: 34, weight: .light, design: .rounded))
+                    .font(.system(size: 34, weight: alarm.isEnabled ? .regular : .ultraLight, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(alarm.isEnabled ? .primary : .secondary)
+                    .foregroundStyle(alarm.isEnabled ? theme.text : theme.secondaryText)
 
                 HStack(spacing: 6) {
                     Text(alarm.label.isEmpty ? "Alarm" : alarm.label)
@@ -98,14 +102,14 @@ private struct AlarmRow: View {
                     Text(alarm.repeatSummary)
                 }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .themedSecondary()
 
                 Label(
                     alarm.dismissalMode == .tasks ? "\(alarm.requiredTaskCount) problems" : "Message a contact",
                     systemImage: alarm.dismissalMode == .tasks ? "function" : "paperplane.fill"
                 )
                 .font(.caption2)
-                .foregroundStyle(.tint)
+                .foregroundStyle(theme.tint)
             }
 
             Spacer()

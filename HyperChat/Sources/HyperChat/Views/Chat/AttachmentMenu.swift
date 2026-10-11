@@ -3,19 +3,18 @@ import UniformTypeIdentifiers
 
 /// The attachment menu in the composer: camera, library, document, GIF.
 ///
-/// FIX (photos/videos couldn't be sent): the photo picker used to be a
-/// `PhotosPicker` *inside* this `Menu`. The menu closes the moment an item is
-/// tapped and SwiftUI tears its content down — including the picker's
-/// selection binding — so the chosen photo was often never delivered. The
-/// menu now only raises a flag; the picker is attached to the chat screen
-/// itself with `.photosPicker(isPresented:)`, which stays alive.
+/// The menu only raises a flag; the photo picker is attached to the chat screen
+/// itself, because a `PhotosPicker` inside a `Menu` is torn down together with it.
 struct AttachmentMenu: View {
+    @Environment(\.appTheme) private var theme
+
     let isDisabled: Bool
     let onCamera: () -> Void
     let onPhotoLibrary: () -> Void
     let onDocument: () -> Void
     let onGIF: () -> Void
-    var tint: Color = Color.brand
+    /// nil = follow the theme.
+    var tint: Color? = nil
 
     var body: some View {
         Menu {
@@ -32,9 +31,11 @@ struct AttachmentMenu: View {
                 Label("GIF", systemImage: "face.smiling")
             }
         } label: {
+            // FIX: was hard-coded `Color.brand`, i.e. a blue "+" on a blue
+            // composer. It now follows the bar it sits on.
             Image(systemName: "plus.circle.fill")
                 .font(.title2)
-                .foregroundStyle(isDisabled ? Color.secondary : tint)
+                .foregroundStyle((tint ?? theme.tint).opacity(isDisabled ? 0.4 : 1))
         }
         .disabled(isDisabled)
         .accessibilityLabel("Add attachment")

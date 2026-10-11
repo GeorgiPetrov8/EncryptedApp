@@ -19,7 +19,8 @@ struct ChatView: View {
     @State private var showPhotoPicker = false
     @State private var showDocumentPicker = false
     @State private var showGIFPicker = false
-    /// NEW: message the full emoji picker is open for.
+
+    /// Message the full emoji picker is open for.
     @State private var reactionTarget: DisplayMessage?
 
     init(container: AppContainer, conversation: Conversation) {
@@ -50,8 +51,9 @@ struct ChatView: View {
             .background { chatBackground }
             .environment(\.chatAppearance, appearance)
             .environment(\.chromeStyle, chrome)
+            .environment(\.appTheme, chatTheme)
             .toolbar(.hidden, for: .navigationBar)
-            .appNavigationBarStyle(appearanceStore.appTheme)
+            .appNavigationBarStyle(chatTheme)
             .photosPicker(
                 isPresented: $showPhotoPicker,
                 selection: $viewModel.selectedPhotoItem,
@@ -94,9 +96,11 @@ struct ChatView: View {
                 .environmentObject(container)
             }
             .sheet(item: $reactionTarget) { message in
+                // FIX: needs the container — the picker now follows the app theme.
                 EmojiPickerView { emoji in
                     viewModel.react(to: message, emoji: emoji)
                 }
+                .environmentObject(container)
             }
             .sheet(item: $viewModel.sharedFile) { file in
                 ActivityView(url: file.url) {
@@ -119,9 +123,7 @@ struct ChatView: View {
             .onChange(of: viewModel.wasRemoved) { _, removed in
                 if removed { dismiss() }
             }
-            // FIX: outermost, so it also covers every sheet above. When it sat
-            // before the `.sheet` modifiers, sheets inherited the chats
-            // list's white tint and their buttons disappeared.
+            // Outermost, so it also covers every sheet above.
             .tint(Color.brand)
     }
 
@@ -131,8 +133,13 @@ struct ChatView: View {
         appearanceStore.appearance(for: viewModel.conversation.id)
     }
 
+    /// Everything the chat draws — bars, bubbles, banners, ticks — comes from this.
+    private var chatTheme: AppTheme {
+        appearanceStore.theme(for: appearance)
+    }
+
     private var chrome: ChromeStyle {
-        appearanceStore.chrome(for: appearance)
+        chatTheme.chrome
     }
 
     private var chatBackground: some View {
@@ -148,6 +155,7 @@ struct ChatView: View {
                 name: viewModel.peerUsername,
                 avatar: peerAvatarData,
                 isOnline: isPeerOnline,
+                ringColor: chrome.fill,
                 isVerified: viewModel.peerIsVerified,
                 identityChanged: viewModel.peerIdentityChanged,
                 canCall: viewModel.canCall,
@@ -167,6 +175,9 @@ struct ChatView: View {
         .padding(.horizontal, 10)
         .padding(.top, 2)
         .padding(.bottom, 4)
+        // Explicit, so the bar never depends on how the environment reaches an inset.
+        .environment(\.appTheme, chatTheme)
+        .environment(\.chromeStyle, chrome)
     }
 
     @ViewBuilder
@@ -179,6 +190,8 @@ struct ChatView: View {
         }
     }
 
+    /// FIX: the buttons were `.borderedProminent.tint(Color.brand)` and a system
+    /// bordered style — a blue pill on a blue notch, i.e. invisible Accept/Invite.
     @ViewBuilder
     private var invitationBanner: some View {
         switch viewModel.relationshipState {
@@ -192,10 +205,9 @@ struct ChatView: View {
                 isBusy: viewModel.isUpdatingInvitation
             ) {
                 Button("Accept") { Task { await viewModel.acceptInvitation() } }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.brand)
+                    .buttonStyle(.themedProminent)
                 Button("Decline", role: .destructive) { Task { await viewModel.declineInvitation() } }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.themedBordered)
             }
             .notchStyle(chrome, cornerRadius: 16)
         case .invitedByMe:
@@ -206,7 +218,7 @@ struct ChatView: View {
                 isBusy: viewModel.isUpdatingInvitation
             ) {
                 Button("Resend invitation") { Task { await viewModel.resendInvitation() } }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.themedBordered)
             }
             .notchStyle(chrome, cornerRadius: 16)
         case .declined:
@@ -217,7 +229,7 @@ struct ChatView: View {
                 isBusy: viewModel.isUpdatingInvitation
             ) {
                 Button("Invite again") { Task { await viewModel.resendInvitation() } }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.themedBordered)
             }
             .notchStyle(chrome, cornerRadius: 16)
         }
@@ -291,6 +303,8 @@ struct ChatView: View {
         }
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
+        .environment(\.appTheme, chatTheme)
+        .environment(\.chromeStyle, chrome)
     }
 
     @ViewBuilder
@@ -312,6 +326,8 @@ struct ChatView: View {
         }
     }
 
+    /// FIX: the notices were a system material with grey buttons — the one piece of
+    /// chrome that ignored the theme. They are now notches like the bars around them.
     @ViewBuilder
     private var noticeBars: some View {
         if let receiveError = viewModel.receiveError {
@@ -321,7 +337,7 @@ struct ChatView: View {
                 icon: "exclamationmark.triangle.fill",
                 onDismiss: { viewModel.dismissReceiveError() }
             )
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .notchStyle(chrome, cornerRadius: 16)
         }
         if let error = viewModel.errorMessage {
             NoticeBar(
@@ -331,7 +347,7 @@ struct ChatView: View {
                 onDismiss: { viewModel.dismissSendError() },
                 action: retryAction
             )
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .notchStyle(chrome, cornerRadius: 16)
         }
     }
 
@@ -387,6 +403,7 @@ private struct ChatHeaderNotch: View {
     let name: String
     let avatar: Data?
     let isOnline: Bool
+    let ringColor: Color?
     let isVerified: Bool
     let identityChanged: Bool
     let canCall: Bool
@@ -412,7 +429,8 @@ private struct ChatHeaderNotch: View {
                 displayName: name,
                 imageData: avatar,
                 size: 36,
-                isOnline: isOnline
+                isOnline: isOnline,
+                ringColor: ringColor
             )
 
             VStack(alignment: .leading, spacing: 1) {
@@ -475,7 +493,6 @@ private struct ChatHeaderNotch: View {
             } label: {
                 Image(systemName: identityChanged ? "exclamationmark.shield.fill" : "ellipsis.circle")
                     .font(.title3)
-                    .foregroundStyle(identityChanged ? Color.red : Color.primary)
                     .frame(width: 32, height: 36)
             }
             .accessibilityLabel("More")
@@ -515,6 +532,8 @@ private struct ComposerContextBar: View {
     }
 }
 
+/// A notice above the composer. The surface comes from `.notchStyle` at the call
+/// site; the status colour is a stripe and an icon, never body text.
 struct NoticeBar: View {
     struct Action {
         let title: String
@@ -536,18 +555,17 @@ struct NoticeBar: View {
             Spacer()
             if let action {
                 Button(action.title, action: action.handler)
-                    .font(.footnote.bold())
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.themedBordered)
             }
             Button(action: onDismiss) {
                 Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
             }
             .accessibilityLabel("Dismiss")
         }
         .padding(10)
-        .background(.bar)
-        .background(tint.opacity(0.12))
+        .overlay(alignment: .leading) {
+            Rectangle().fill(tint).frame(width: 4)
+        }
     }
 }
 
@@ -570,7 +588,6 @@ private struct InvitationBanner<Actions: View>: View {
                 actions()
                 if isBusy { ProgressView() }
             }
-            .font(.footnote)
             .disabled(isBusy)
         }
         .padding(12)

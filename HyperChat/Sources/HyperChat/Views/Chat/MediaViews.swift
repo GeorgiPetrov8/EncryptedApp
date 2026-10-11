@@ -136,7 +136,13 @@ struct ActivityView: UIViewControllerRepresentable {
 
 // MARK: - Reactions
 
+/// FIX: the chip was a system material with `.primary` text and a `Color.brand`
+/// outline for your own reaction — a different surface from the bubbles beside
+/// it, and an invisible outline on a blue background. It now uses the chat
+/// theme's surface and accent.
 struct ReactionBar: View {
+    @Environment(\.appTheme) private var theme
+
     let reactions: [ReactionSummary]
     let onTap: (ReactionSummary) -> Void
 
@@ -151,15 +157,18 @@ struct ReactionBar: View {
                         if reaction.count > 1 {
                             Text("\(reaction.count)")
                                 .font(.caption2.bold())
-                                .foregroundStyle(.primary)
+                                .foregroundStyle(theme.text)
                         }
                     }
                     .font(.footnote)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(.regularMaterial, in: Capsule())
+                    .background { chipBackground }
                     .overlay(
-                        Capsule().strokeBorder(reaction.includesMe ? Color.brand : .clear, lineWidth: 1.5)
+                        Capsule().strokeBorder(
+                            reaction.includesMe ? (theme.isCustom ? theme.accentFill : Color.brand) : Color.clear,
+                            lineWidth: 1.5
+                        )
                     )
                 }
                 .buttonStyle(.plain)
@@ -167,14 +176,24 @@ struct ReactionBar: View {
             }
         }
     }
+
+    @ViewBuilder
+    private var chipBackground: some View {
+        if theme.isCustom {
+            Capsule().fill(theme.incomingBubbleFill)
+        } else {
+            Capsule().fill(.regularMaterial)
+        }
+    }
 }
 
 // MARK: - GIFs
 
-/// A GIF message. Loads from the provider automatically only if the user
-/// turned GIFs on; otherwise asks first, because loading reveals their IP
-/// address to the provider.
+/// A GIF message. Loads from the provider automatically only if the user turned
+/// GIFs on; otherwise asks first, because loading reveals their IP address.
 struct GIFMessageView: View {
+    @Environment(\.appTheme) private var theme
+
     let gif: GIFAttachment
     let autoload: Bool
     @State private var loadRequested = false
@@ -195,6 +214,7 @@ struct GIFMessageView: View {
             Button {
                 loadRequested = true
             } label: {
+                // FIX: this separator was saved with the wrong text encoding and showed a stray character.
                 placeholder(icon: "play.rectangle", text: "GIF · tap to load\nfrom \(gif.providerName)")
             }
             .buttonStyle(.plain)
@@ -213,9 +233,9 @@ struct GIFMessageView: View {
             Image(systemName: icon).font(.title2)
             Text(text).font(.caption).multilineTextAlignment(.center)
         }
-        .foregroundStyle(.secondary)
+        .foregroundStyle(theme.text)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.secondarySystemBackground))
+        .background(theme.incomingBubbleFill)
     }
 }
 

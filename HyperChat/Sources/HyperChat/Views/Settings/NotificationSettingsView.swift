@@ -61,7 +61,7 @@ struct NotificationSettingsView: View {
                 }
 
                 ThemedSection {
-                    Button("Generate a new topic", role: .destructive) {
+                    ThemedRowButton(title: "Generate a new topic", isDestructive: true) {
                         confirmRegenerate = true
                     }
                 } footer: {
@@ -70,10 +70,10 @@ struct NotificationSettingsView: View {
             }
 
             if let info {
-                ThemedSection { Text(info).font(.footnote).foregroundStyle(.green) }
+                ThemedSection { StatusText(info, .success) }
             }
             if let errorMessage {
-                ThemedSection { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
+                ThemedSection { StatusText(errorMessage, .error) }
             }
         }
         .navigationTitle("Notifications")

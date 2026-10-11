@@ -19,16 +19,14 @@ struct ConversationListView: View {
         )
     }
 
-    private var listAppearance: ChatAppearance { container.appearanceStore.listAppearance }
-    private var chrome: ChromeStyle { container.appearanceStore.chrome(for: listAppearance) }
-    private var barTint: Color { container.appearanceStore.barTint }
+    private var theme: AppTheme { container.appearanceStore.appTheme }
+    private var barTint: Color { theme.tint }
 
     var body: some View {
         NavigationStack {
             list
-                // FIX: a little space between the bar and the first chat —
-                // they used to touch.
-                .contentMargins(.top, 12, for: .scrollContent)
+                // The 12 pt space under the bar comes from `.appScreenStyle()`;
+                // a second `.contentMargins` here used to add to it.
                 .appScreenStyle(adaptsContent: false)
                 .navigationTitle("Chats")
                 .toolbar { toolbarContent }
@@ -77,14 +75,17 @@ struct ConversationListView: View {
     private var list: some View {
         List {
             if viewModel.summaries.isEmpty {
-                ContentUnavailableView(
-                    "No conversations yet",
+                // FIX: `ContentUnavailableView` ignores the theme (grey description).
+                ThemedEmptyState(
+                    title: "No conversations yet",
                     systemImage: "bubble.left.and.bubble.right",
-                    description: Text("Tap the compose button to invite someone to an encrypted chat.")
+                    description: "Tap the compose button to invite someone to an encrypted chat.",
+                    placement: .background
                 )
-                .foregroundStyle(chrome.fill == nil ? Color.primary : listAppearance.foregroundColor)
                 .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
             }
+
             ForEach(viewModel.summaries) { summary in
                 Button {
                     navigateToConversation = summary.conversation
@@ -94,19 +95,19 @@ struct ConversationListView: View {
                         avatar: avatar(for: summary.peerId),
                         isOnline: summary.relationshipState == .accepted
                             && container.presenceService.isOnline(summary.peerId),
-                        chrome: chrome
+                        theme: theme
                     )
                 }
                 .listRowBackground(rowBackground)
-                .listRowSeparator(chrome.fill == nil ? .automatic : .hidden)
+                .listRowSeparator(theme.isCustom ? .hidden : .automatic)
             }
         }
-        .listRowSpacing(chrome.fill == nil ? 0 : 8)
+        .listRowSpacing(theme.isCustom ? 8 : 0)
     }
 
     @ViewBuilder
     private var rowBackground: some View {
-        if let fill = chrome.fill {
+        if let fill = theme.surface {
             RoundedRectangle(cornerRadius: 16, style: .continuous).fill(fill)
         } else {
             Color(.systemBackground)
@@ -119,8 +120,6 @@ struct ConversationListView: View {
     }
 
     // MARK: Toolbar
-    //
-    // Every icon gets an explicit colour — see `AppScreenStyle` for why.
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
@@ -133,6 +132,7 @@ struct ConversationListView: View {
             }
             .accessibilityLabel("Settings")
         }
+
         ToolbarItem(placement: .principal) {
             ConnectionIndicator(
                 isListening: container.messagingService.isListening,
@@ -140,6 +140,7 @@ struct ConversationListView: View {
             )
             .foregroundStyle(barTint)
         }
+
         ToolbarItemGroup(placement: .navigationBarTrailing) {
             NavigationLink {
                 InvitationsView()
@@ -178,10 +179,10 @@ private struct ConversationRow: View {
     let summary: ConversationSummary
     let avatar: Data?
     let isOnline: Bool
-    let chrome: ChromeStyle
+    let theme: AppTheme
 
-    private var primary: Color { chrome.fill == nil ? .primary : chrome.foreground }
-    private var secondary: Color { chrome.fill == nil ? .secondary : chrome.foreground }
+    private var primary: Color { theme.text }
+    private var secondary: Color { theme.secondaryText }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -190,7 +191,8 @@ private struct ConversationRow: View {
                 displayName: summary.otherUsername,
                 imageData: avatar,
                 size: 48,
-                isOnline: isOnline
+                isOnline: isOnline,
+                ringColor: theme.surface
             )
 
             VStack(alignment: .leading, spacing: 4) {
@@ -201,13 +203,13 @@ private struct ConversationRow: View {
                     if summary.isVerified {
                         Image(systemName: "checkmark.shield.fill")
                             .font(.caption2)
-                            .foregroundStyle(chrome.fill == nil ? Color.green : chrome.foreground)
+                            .foregroundStyle(theme.isCustom ? theme.surfaceText : Color.green)
                             .accessibilityLabel("Identity verified")
                     }
                     if summary.hasIdentityWarning {
                         Image(systemName: "exclamationmark.shield.fill")
                             .font(.caption2)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(theme.isCustom ? theme.surfaceText : Color.red)
                             .accessibilityLabel("Security keys changed")
                     }
                     Spacer()
@@ -217,6 +219,7 @@ private struct ConversationRow: View {
                             .foregroundStyle(secondary)
                     }
                 }
+
                 HStack(spacing: 4) {
                     stateIcon
                     Text(summary.lastMessagePreview)
@@ -226,7 +229,7 @@ private struct ConversationRow: View {
                 }
             }
         }
-        .padding(.vertical, chrome.fill == nil ? 0 : 4)
+        .padding(.vertical, theme.isCustom ? 4 : 0)
     }
 
     @ViewBuilder

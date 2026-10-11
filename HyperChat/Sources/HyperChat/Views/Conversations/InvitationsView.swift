@@ -9,20 +9,24 @@ struct InvitationsView: View {
     var body: some View {
         List {
             if service.pendingIncoming.isEmpty {
-                ContentUnavailableView(
-                    "No invitations",
-                    systemImage: "person.crop.circle.badge.questionmark",
-                    description: Text("When someone invites you to chat, it'll appear here.")
-                )
-                .listRowBackground(container.appearanceStore.appTheme.rowFill)
+                ThemedSection {
+                    ThemedEmptyState(
+                        title: "No invitations",
+                        systemImage: "person.crop.circle.badge.questionmark",
+                        description: "When someone invites you to chat, it'll appear here."
+                    )
+                }
             } else {
                 ForEach(service.pendingIncoming) { conversation in
-                    InvitationRow(
-                        conversation: conversation,
-                        onAccept: { Task { await service.accept(conversation) } },
-                        onDecline: { Task { await service.decline(conversation) } }
-                    )
-                    .listRowBackground(container.appearanceStore.appTheme.rowFill)
+                    // One section per invitation, so each is its own card and every
+                    // row takes the theme's surface.
+                    ThemedSection {
+                        InvitationRow(
+                            conversation: conversation,
+                            onAccept: { Task { await service.accept(conversation) } },
+                            onDecline: { Task { await service.decline(conversation) } }
+                        )
+                    }
                 }
             }
         }
@@ -34,6 +38,8 @@ struct InvitationsView: View {
 
 private struct InvitationRow: View {
     @EnvironmentObject private var container: AppContainer
+    @Environment(\.appTheme) private var theme
+
     let conversation: Conversation
     let onAccept: () -> Void
     let onDecline: () -> Void
@@ -53,23 +59,24 @@ private struct InvitationRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(displayName)
                         .font(.headline)
-                        .foregroundStyle(.primary)
+                        .themedText()
                     if let sentAt = conversation.inviteSentAt {
-                        Text(sentAt, style: .relative) + Text(" ago")
+                        (Text(sentAt, style: .relative) + Text(" ago"))
+                            .font(.caption)
+                            .themedSecondary()
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
             }
 
             if let note = conversation.inviteNote, !note.isEmpty {
                 Text(note)
                     .font(.footnote)
-                    .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .themedField()
             }
 
+            // FIX: `.borderedProminent.tint(Color.brand)` was a blue pill on a blue
+            // row. These two keep their contrast on any background.
             HStack(spacing: 10) {
                 Button {
                     isWorking = true
@@ -77,8 +84,7 @@ private struct InvitationRow: View {
                 } label: {
                     Text("Accept").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.brand)
+                .buttonStyle(.themedProminent)
 
                 Button(role: .destructive) {
                     isWorking = true
@@ -86,13 +92,13 @@ private struct InvitationRow: View {
                 } label: {
                     Text("Decline").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.themedBordered)
             }
             .disabled(isWorking)
 
             Text("They can't message or call you until you accept.")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .themedSecondary()
         }
         .padding(.vertical, 6)
         .onAppear(perform: loadContact)
@@ -115,11 +121,6 @@ private struct InvitationRow: View {
 }
 
 /// "New Chat": invite someone by username.
-///
-/// FIX: uses `ThemedSection`, so rows take the notch colour and the
-/// header/footer are readable on the background. The manual
-/// `.foregroundStyle(barTint)` calls are gone — toolbar buttons ignore
-/// `foregroundStyle`; they follow the `tint` that `.appScreenStyle()` sets.
 struct NewInvitationView: View {
     @EnvironmentObject private var container: AppContainer
     @Environment(\.dismiss) private var dismiss
@@ -159,11 +160,7 @@ struct NewInvitationView: View {
                 }
 
                 if let errorMessage {
-                    ThemedSection {
-                        Text(errorMessage)
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.red)
-                    }
+                    ThemedSection { StatusText(errorMessage, .error) }
                 }
             }
             .navigationTitle("New Chat")

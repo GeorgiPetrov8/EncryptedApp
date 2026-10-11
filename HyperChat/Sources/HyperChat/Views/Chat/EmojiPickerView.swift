@@ -4,18 +4,26 @@ import UIKit
 /// Full emoji picker for reactions.
 ///
 /// Two ways to pick:
-///   - the built-in grid (every single-character emoji, searchable by its
-///     English Unicode name: "heart", "fire", "cat"…);
-///   - "Type any emoji" — opens the system emoji keyboard, which also covers
-///     flags, skin tones and combined emoji (👨‍👩‍👧, 🏳️‍🌈) that the grid doesn't list.
+///   - the built-in grid (every single-character emoji, searchable by its English
+///     Unicode name: "heart", "fire", "cat"…);
+///   - "Type any emoji" — opens the system emoji keyboard, which also covers flags,
+///     skin tones and combined emoji that the grid doesn't list.
+///
+/// FIX: it was a plain system sheet (hard-coded `.tint(Color.brand)`, grey
+/// `.secondary` headings, system-grey fields). It now follows the app theme, so it
+/// needs the container in the environment — `ChatView` provides it.
 struct EmojiPickerView: View {
+    @EnvironmentObject private var container: AppContainer
+    @Environment(\.dismiss) private var dismiss
+
     let onPick: (String) -> Void
 
-    @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var recent: [String] = EmojiRecents.load()
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 8)
+
+    private var theme: AppTheme { container.appearanceStore.appTheme }
 
     var body: some View {
         NavigationStack {
@@ -24,9 +32,8 @@ struct EmojiPickerView: View {
                     searchField
 
                     EmojiKeyboardField { emoji in pick(emoji) }
-                        .frame(height: 40)
-                        .padding(.horizontal, 12)
-                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                        .frame(height: 20)
+                        .themedField()
 
                     if query.isEmpty {
                         if !recent.isEmpty {
@@ -40,7 +47,7 @@ struct EmojiPickerView: View {
                         if matches.isEmpty {
                             Text("No emoji match “\(query)”. Try English words, or type one with the keyboard above.")
                                 .font(.footnote)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(theme.onBackground)
                         } else {
                             section("Results", items: matches.map(\.emoji))
                         }
@@ -55,32 +62,31 @@ struct EmojiPickerView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
+            .appScreenStyle()
         }
-        .tint(Color.brand)
         .presentationDetents([.medium, .large])
     }
 
     private var searchField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            Image(systemName: "magnifyingglass")
             TextField("Search emoji", text: $query)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             if !query.isEmpty {
                 Button { query = "" } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    Image(systemName: "xmark.circle.fill")
                 }
             }
         }
-        .padding(10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+        .themedField()
     }
 
     private func section(_ title: String, items: [String]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.caption.bold())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(theme.onBackground)
             LazyVGrid(columns: columns, spacing: 4) {
                 ForEach(items, id: \.self) { emoji in
                     Button {
@@ -119,8 +125,8 @@ enum EmojiCatalog {
         var id: String { title }
     }
 
-    /// Built once from Unicode itself, so it includes every emoji the system
-    /// knows about in these blocks — no hand-maintained list to go stale.
+    /// Built once from Unicode itself, so it includes every emoji the system knows
+    /// about in these blocks — no hand-maintained list to go stale.
     static let categories: [Category] = [
         build("Smileys", [0x1F600...0x1F64F, 0x1F910...0x1F92F, 0x1F970...0x1F97A, 0x1FAE0...0x1FAEF]),
         build("People & body", [0x1F440...0x1F4AA, 0x1F930...0x1F94F, 0x1F9B0...0x1F9DF, 0x1FAC0...0x1FACF, 0x1FAF0...0x1FAFF]),
@@ -181,8 +187,8 @@ enum EmojiRecents {
 
 // MARK: - Emoji keyboard
 
-/// A text field that opens straight onto the emoji keyboard and reports the
-/// first emoji typed.
+/// A text field that opens straight onto the emoji keyboard and reports the first
+/// emoji typed.
 struct EmojiKeyboardField: UIViewRepresentable {
     let onEmoji: (String) -> Void
 
@@ -212,9 +218,9 @@ struct EmojiKeyboardField: UIViewRepresentable {
 }
 
 final class EmojiOnlyTextField: UITextField {
-    /// Asks iOS for the emoji keyboard. Works when the Emoji keyboard is
-    /// enabled (it is by default); otherwise the normal keyboard appears and
-    /// the 🌐 key switches to emoji.
+    /// Asks iOS for the emoji keyboard. Works when the Emoji keyboard is enabled (it
+    /// is by default); otherwise the normal keyboard appears and the 🌐 key
+    /// switches to emoji.
     override var textInputMode: UITextInputMode? {
         UITextInputMode.activeInputModes.first { $0.primaryLanguage == "emoji" } ?? super.textInputMode
     }

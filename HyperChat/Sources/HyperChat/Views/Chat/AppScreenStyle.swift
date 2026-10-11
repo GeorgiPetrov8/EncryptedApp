@@ -2,63 +2,20 @@ import SwiftUI
 
 extension Color {
     /// The app's own blue, independent of the environment `.tint`.
-    ///
-    /// FIX (white text / white buttons): the chats list tints its navigation
-    /// stack with the bar colour (white on a dark background) so its back
-    /// buttons stay readable. `Color.accentColor` follows that tint, so
-    /// everything built from it — your own message bubbles, the play button
-    /// of voice messages, buttons in sheets — turned white on white. Anything
-    /// that must stay blue now uses `.brand` instead.
     static let brand = Color(uiColor: .systemBlue)
-}
-
-struct AppTheme {
-    let appearance: ChatAppearance
-    let chrome: ChromeStyle
-
-    static let system = AppTheme(appearance: .default, chrome: .system)
-
-    var isCustom: Bool { chrome.fill != nil }
-
-    /// Text placed directly on the background: section headers and footers.
-    var onBackground: Color { isCustom ? appearance.foregroundColor : .secondary }
-
-    /// Fill for form rows — the same surface colour as the header notch.
-    var rowFill: Color? { chrome.fill }
-
-    /// Buttons and icons on rows and on the navigation bar.
-    var tint: Color { isCustom ? chrome.foreground : .brand }
-}
-
-private struct AppThemeKey: EnvironmentKey {
-    static let defaultValue = AppTheme.system
-}
-
-extension EnvironmentValues {
-    var appTheme: AppTheme {
-        get { self[AppThemeKey.self] }
-        set { self[AppThemeKey.self] = newValue }
-    }
-}
-
-extension AppearanceStore {
-    var appTheme: AppTheme {
-        let appearance = listAppearance
-        return AppTheme(appearance: appearance, chrome: chrome(for: appearance))
-    }
-
-    /// Kept for existing call sites.
-    var barTint: Color { appTheme.tint }
 }
 
 // MARK: - Screen style
 
-/// Applies the app background to every screen outside a private chat.
+/// Applies the app background and theme to every screen outside a private chat.
+///
+/// Rows, bars and headers all come from one `AppTheme`, so the text colour is the
+/// same on the background, on rows and on the navigation bar.
 struct AppScreenStyle: ViewModifier {
     @EnvironmentObject private var container: AppContainer
 
-    /// Kept for source compatibility; rows are always themed now.
-    var adaptsContent: Bool
+    /// Kept for source compatibility; screens are always themed now.
+    var adaptsContent: Bool = true
 
     func body(content: Content) -> some View {
         let store = container.appearanceStore
@@ -71,18 +28,14 @@ struct AppScreenStyle: ViewModifier {
                 ChatBackgroundView(appearance: theme.appearance) { store.imageURL(fileName: $0) }
             }
             .toolbarBackground(
-                theme.isCustom ? AnyShapeStyle(theme.chrome.fill ?? .clear) : AnyShapeStyle(.bar),
+                theme.surface.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.bar),
                 for: .navigationBar
             )
             .toolbarBackground(theme.isCustom ? .visible : .automatic, for: .navigationBar)
-            .toolbarColorScheme(theme.chrome.colorScheme, for: .navigationBar)
-            // FIX (blue buttons on a blue background): toolbar buttons follow
-            // `tint`, not `foregroundStyle` — that's why setting
-            // `.foregroundStyle(barTint)` on Cancel/Invite had no effect.
+            .toolbarColorScheme(theme.scheme, for: .navigationBar)
+            // Toolbar buttons follow `tint`, not `foregroundStyle`.
             .tint(theme.tint)
-            // Rows are filled with the notch colour, so system text, text
-            // fields and chevrons inside them follow the notch's scheme.
-            .modifier(SchemeOverride(scheme: theme.chrome.colorScheme))
+            .modifier(SchemeOverride(scheme: theme.scheme))
             .modifier(ReadableValues(enabled: theme.isCustom))
             .toggleStyle(ReadableSwitchStyle())
             .environment(\.appTheme, theme)
@@ -94,26 +47,22 @@ extension View {
         modifier(AppScreenStyle(adaptsContent: adaptsContent))
     }
 
-    /// For a navigation container whose bar must keep the app's colours even
-    /// when the pushed screen hides its own bar (the chat screen).
+    /// Keeps the navigation bar's colours on a container whose pushed screen
+    /// hides its own bar (the chat screen).
     func appNavigationBarStyle(_ theme: AppTheme) -> some View {
         self
             .toolbarBackground(
-                theme.isCustom ? AnyShapeStyle(theme.chrome.fill ?? .clear) : AnyShapeStyle(.bar),
+                theme.surface.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.bar),
                 for: .navigationBar
             )
-            .toolbarColorScheme(theme.chrome.colorScheme, for: .navigationBar)
+            .toolbarColorScheme(theme.scheme, for: .navigationBar)
     }
 }
 
 // MARK: - Themed section
 
-/// Drop-in replacement for `Section` on themed screens.
-///
-/// Fills every row with the notch colour and colours the header and footer for
-/// the background. Same initialisers as `Section`, so
-/// `Section { } header: { } footer: { }` becomes
-/// `ThemedSection { } header: { } footer: { }` with no other change.
+/// Drop-in replacement for `Section` on themed screens: rows take the surface
+/// colour, header and footer take the background's text colour.
 struct ThemedSection<Content: View, Header: View, Footer: View>: View {
     @Environment(\.appTheme) private var theme
 
@@ -133,7 +82,6 @@ struct ThemedSection<Content: View, Header: View, Footer: View>: View {
 
     var body: some View {
         Section {
-            // `Group` hands the modifier to every row individually.
             Group { content }
                 .listRowBackground(theme.rowFill)
         } header: {
@@ -168,6 +116,247 @@ extension ThemedSection where Header == Text, Footer == EmptyView {
     }
 }
 
+// MARK: - Text roles
+
+extension View {
+    /// Full-strength text on custom backgrounds, system secondary otherwise.
+    func themedSecondary() -> some View { modifier(ThemedTextModifier(secondary: true)) }
+    func themedText() -> some View { modifier(ThemedTextModifier(secondary: false)) }
+
+    /// Error / success / warning. System colours on the default look; on a
+    /// custom background the text colour (pair it with an icon — see `StatusText`).
+    func themedStatus(_ kind: ThemedStatus) -> some View { modifier(ThemedStatusModifier(kind: kind)) }
+
+    /// A text field's background, matched to the theme.
+    func themedField(cornerRadius: CGFloat = 10) -> some View { modifier(ThemedFieldModifier(cornerRadius: cornerRadius)) }
+}
+
+enum ThemedStatus {
+    case error, success, warning
+
+    var systemColor: Color {
+        switch self {
+        case .error: return .red
+        case .success: return .green
+        case .warning: return .orange
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .error: return "exclamationmark.octagon.fill"
+        case .success: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+private struct ThemedTextModifier: ViewModifier {
+    @Environment(\.appTheme) private var theme
+    let secondary: Bool
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(secondary ? theme.secondaryText : theme.text)
+    }
+}
+
+private struct ThemedStatusModifier: ViewModifier {
+    @Environment(\.appTheme) private var theme
+    let kind: ThemedStatus
+
+    func body(content: Content) -> some View {
+        content.foregroundStyle(theme.isCustom ? theme.text : kind.systemColor)
+    }
+}
+
+private struct ThemedFieldModifier: ViewModifier {
+    @Environment(\.appTheme) private var theme
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .padding(10)
+            .background(theme.fieldFill, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .foregroundStyle(theme.text)
+    }
+}
+
+/// A message with its status icon. On custom backgrounds the icon carries the
+/// meaning, because coloured text is unreadable on most coloured rows.
+struct StatusText: View {
+    @Environment(\.appTheme) private var theme
+
+    let text: String
+    let kind: ThemedStatus
+
+    init(_ text: String, _ kind: ThemedStatus) {
+        self.text = text
+        self.kind = kind
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if theme.isCustom {
+                Image(systemName: kind.symbol)
+            }
+            Text(text)
+        }
+        .font(.footnote.weight(theme.isCustom ? .semibold : .regular))
+        .themedStatus(kind)
+    }
+}
+
+// MARK: - Empty state
+
+/// Replaces `ContentUnavailableView`, whose description is always the system's
+/// grey and ignores the theme.
+struct ThemedEmptyState: View {
+    enum Placement {
+        /// On a row or bar.
+        case surface
+        /// Straight on the background.
+        case background
+    }
+
+    @Environment(\.appTheme) private var theme
+
+    let title: LocalizedStringKey
+    let systemImage: String
+    var description: LocalizedStringKey? = nil
+    var placement: Placement = .surface
+
+    private var primary: Color {
+        guard theme.isCustom else { return .primary }
+        return placement == .surface ? theme.surfaceText : theme.backgroundText
+    }
+
+    private var secondary: Color {
+        theme.isCustom ? primary : .secondary
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 40))
+                .foregroundStyle(secondary)
+            Text(title)
+                .font(.title3.bold())
+                .foregroundStyle(primary)
+            if let description {
+                Text(description)
+                    .font(.subheadline)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Buttons
+
+/// Pill buttons that stay readable on any background.
+///
+/// Replaces `.borderedProminent.tint(Color.brand)`, which painted a blue pill on
+/// blue rows — the invisible "Invite", "Cancel" and "Accept" buttons.
+struct ThemedButtonStyle: ButtonStyle {
+    enum Kind { case prominent, bordered }
+    let kind: Kind
+
+    func makeBody(configuration: Configuration) -> some View {
+        ThemedButtonBody(configuration: configuration, kind: kind)
+    }
+}
+
+extension ButtonStyle where Self == ThemedButtonStyle {
+    static var themedProminent: ThemedButtonStyle { ThemedButtonStyle(kind: .prominent) }
+    static var themedBordered: ThemedButtonStyle { ThemedButtonStyle(kind: .bordered) }
+}
+
+private struct ThemedButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let kind: ThemedButtonStyle.Kind
+
+    @Environment(\.appTheme) private var theme
+    @Environment(\.isEnabled) private var isEnabled
+
+    private var foreground: Color {
+        switch kind {
+        case .prominent:
+            return theme.accentText
+        case .bordered:
+            if configuration.role == .destructive && !theme.isCustom { return .red }
+            return theme.tint
+        }
+    }
+
+    var body: some View {
+        configuration.label
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .frame(minHeight: 34)
+            .background { pill }
+            .opacity(isEnabled ? (configuration.isPressed ? 0.75 : 1) : 0.45)
+    }
+
+    @ViewBuilder
+    private var pill: some View {
+        switch kind {
+        case .prominent:
+            Capsule().fill(theme.accentFill)
+        case .bordered:
+            if theme.isCustom {
+                Capsule().strokeBorder(theme.tint, lineWidth: 1.5)
+            } else {
+                Capsule().fill(Color.brand.opacity(0.15))
+            }
+        }
+    }
+}
+
+/// A row-level button. Destructive ones keep the system red on the default look;
+/// on a custom background they use the text colour with an icon and heavier weight.
+struct ThemedRowButton: View {
+    @Environment(\.appTheme) private var theme
+
+    let title: LocalizedStringKey
+    var systemImage: String? = nil
+    var isDestructive = false
+    let action: () -> Void
+
+    var body: some View {
+        if isDestructive && !theme.isCustom {
+            Button(role: .destructive, action: action) { label }
+        } else if isDestructive {
+            Button(action: action) {
+                label
+                    .fontWeight(.semibold)
+                    .foregroundStyle(theme.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            Button(action: action) { label }
+        }
+    }
+
+    @ViewBuilder
+    private var label: some View {
+        if let systemImage {
+            Label(title, systemImage: systemImage)
+        } else if isDestructive && theme.isCustom {
+            Label(title, systemImage: "exclamationmark.triangle.fill")
+        } else {
+            Text(title)
+        }
+    }
+}
+
 // MARK: - Helpers
 
 private struct SchemeOverride: ViewModifier {
@@ -183,9 +372,9 @@ private struct SchemeOverride: ViewModifier {
     }
 }
 
-/// `LabeledContent` values ("Username   test123") are grey by default, which
-/// drops below readable contrast on a coloured row. On custom backgrounds the
-/// value uses the full text colour and is set apart by weight instead.
+/// `LabeledContent` values are grey by default, which drops below readable
+/// contrast on a coloured row. On custom backgrounds the value uses the full
+/// text colour and is set apart by weight.
 private struct ReadableValues: ViewModifier {
     let enabled: Bool
 

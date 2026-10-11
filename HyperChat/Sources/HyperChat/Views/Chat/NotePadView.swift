@@ -1,19 +1,14 @@
 import SwiftUI
 
 /// The shared note/todo/get/buy pad for one conversation.
-///
-/// This pack adds the two things that were missing (feature #1):
-///   - an explicit **send button** next to the add field, matching the chat
-///     composer, rather than return-key-only submission;
-///   - a **delete affordance on completed items**, so finishing something and
-///     clearing it are separate, discoverable actions.
 struct NotePadView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.appTheme) private var theme
     @StateObject private var viewModel: NotePadViewModel
+    @ObservedObject private var appearanceStore: AppearanceStore
     @FocusState private var addFieldFocused: Bool
 
     init(container: AppContainer, conversation: Conversation) {
+        _appearanceStore = ObservedObject(wrappedValue: container.appearanceStore)
         _viewModel = StateObject(
             wrappedValue: NotePadViewModel(
                 conversation: conversation,
@@ -22,32 +17,36 @@ struct NotePadView: View {
         )
     }
 
+    /// Read explicitly: an `@Environment(\.appTheme)` declared here would be the
+    /// value from *outside* `.appScreenStyle()` (the default look), because this
+    /// view is the one applying it.
+    private var theme: AppTheme { appearanceStore.appTheme }
+
     var body: some View {
         NavigationStack {
             List {
                 if viewModel.visibleItems.isEmpty {
-                    ContentUnavailableView(
-                        "Nothing here yet",
-                        systemImage: "checklist",
-                        description: Text("Add something to get, do, or remember — it's shared and end-to-end encrypted, just like the chat.")
-                    )
-                    .listRowSeparator(.hidden)
+                    ThemedSection {
+                        ThemedEmptyState(
+                            title: "Nothing here yet",
+                            systemImage: "checklist",
+                            description: "Add something to get, do, or remember — it's shared and end-to-end encrypted, just like the chat."
+                        )
+                    }
                 } else {
                     outstandingSection
                     completedSection
                 }
             }
-            .listStyle(.plain)
+            // FIX: was `.plain`, whose pinned headers have their own system
+            // background — a different surface from every other screen.
+            .listStyle(.insetGrouped)
             .navigationTitle("Shared Pad")
-            .appScreenStyle()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
-                // Clearing finished items one by one is tedious once a few
-                // have piled up, which is the normal state of a shopping list
-                // after a shop.
                 if viewModel.completedItems.count > 1 {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button("Clear done") { viewModel.deleteCompleted() }
@@ -55,18 +54,16 @@ struct NotePadView: View {
                     }
                 }
             }
-            .appScreenStyle()
+            // FIX: the add bar was attached AFTER `.appScreenStyle()` (and once
+            // more by a duplicate call), so it sat outside the themed scope in a
+            // system material. It now sits inside it, as a notch like the chat
+            // composer.
             .safeAreaInset(edge: .bottom) { addItemBar }
+            .appScreenStyle()
         }
     }
 
     // MARK: Sections
-    //
-    // Split into two sections rather than one sorted list so the delete
-    // affordance can differ: outstanding items are deleted by swiping (a
-    // deliberate, slightly effortful gesture, because deleting something you
-    // still need to do is usually a mistake), while completed items get a
-    // visible tap target (because clearing them is routine).
 
     @ViewBuilder
     private var outstandingSection: some View {
@@ -111,7 +108,8 @@ struct NotePadView: View {
     // MARK: Composer
 
     private var addItemBar: some View {
-        HStack(spacing: 10) {
+        let current = theme
+        return HStack(spacing: 10) {
             TextField("Add an item…", text: $viewModel.newItemText, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...3)
@@ -119,23 +117,19 @@ struct NotePadView: View {
                 .submitLabel(.done)
                 .onSubmit(submit)
 
-            // FIX (feature #1): the send button the pad was missing.
-            //
-            // Return-key-only submission is invisible on a soft keyboard and
-            // impossible with an external one where Return may insert a
-            // newline. It also made the pad inconsistent with the chat
-            // composer directly beneath it in the same app.
             Button(action: submit) {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.title2)
-                    .foregroundStyle(canSubmit ? Color.brand : Color.secondary)
+                    .foregroundStyle(current.tint.opacity(canSubmit ? 1 : 0.4))
             }
             .disabled(!canSubmit)
             .accessibilityLabel("Add item")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.bar)
+        .notchStyle(current.chrome)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
     }
 
     private var canSubmit: Bool {
@@ -145,9 +139,7 @@ struct NotePadView: View {
     private func submit() {
         guard canSubmit else { return }
         viewModel.addItem()
-        // Focus is kept so several items can be added in a row without
-        // reaching for the field again — the common case when writing a
-        // shopping list.
+        // Focus is kept so several items can be added in a row.
         addFieldFocused = true
     }
 }
@@ -159,16 +151,20 @@ private struct NotePadRow: View {
     let onRename: (String) -> Void
     let onDelete: () -> Void
 
+    @Environment(\.appTheme) private var theme
+
     @State private var isEditing = false
     @State private var editedText = ""
     @FocusState private var editFieldFocused: Bool
 
     var body: some View {
         HStack(spacing: 12) {
+            // Done is a filled tick, not-done an empty circle — the shape tells
+            // them apart, so no green/grey is needed.
             Button(action: onToggle) {
                 Image(systemName: item.isDone ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
-                    .foregroundStyle(item.isDone ? .green : .secondary)
+                    .foregroundStyle(item.isDone && !theme.isCustom ? Color.green : theme.text)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(item.isDone ? "Mark not done" : "Mark done")
@@ -183,24 +179,22 @@ private struct NotePadRow: View {
                         editFieldFocused = true
                     }
             } else {
+                // A finished item is struck through (and secondary on the default
+                // look). On a custom background it keeps full contrast.
                 Text(item.text)
-                    .strikethrough(item.isDone, color: .secondary)
-                    .foregroundStyle(item.isDone ? .secondary : .primary)
+                    .strikethrough(item.isDone)
+                    .foregroundStyle(item.isDone ? theme.secondaryText : theme.text)
                     .onTapGesture { isEditing = true }
             }
 
             Spacer(minLength: 8)
 
-            // FIX (feature #1): visible delete for completed items.
-            //
-            // Swipe-to-delete stays available for everything, but it's a
-            // hidden gesture. A ticked-off item is finished business, and
-            // clearing it shouldn't require discovering a swipe.
+            // A visible delete for completed items; swipe-to-delete remains for all.
             if showsDeleteButton && !isEditing {
                 Button(action: onDelete) {
                     Image(systemName: "trash")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(theme.secondaryText)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Delete item")
@@ -208,8 +202,7 @@ private struct NotePadRow: View {
         }
         .contentShape(Rectangle())
         .onChange(of: editFieldFocused) { _, focused in
-            // Ends editing on focus loss, not only on explicit submit —
-            // matches inline list editing elsewhere on iOS.
+            // Ends editing on focus loss, not only on explicit submit.
             if !focused && isEditing { commitEdit() }
         }
     }

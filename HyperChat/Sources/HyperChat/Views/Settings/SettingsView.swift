@@ -23,7 +23,7 @@ struct SettingsView: View {
 
             if let errorMessage {
                 ThemedSection {
-                    Text(errorMessage).foregroundStyle(.red).font(.footnote)
+                    StatusText(errorMessage, .error)
                 }
             }
         }
@@ -77,12 +77,14 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(container.authService.currentUsername ?? "")
                         .font(.headline)
+
                     PhotosPicker(selection: $selectedAvatar, matching: .images) {
                         Text(myAvatar == nil ? "Add photo" : "Change photo")
                     }
                     .disabled(container.profileService.isUpdating)
+
                     if myAvatar != nil {
-                        Button("Remove photo", role: .destructive) {
+                        ThemedRowButton(title: "Remove photo", isDestructive: true) {
                             Task { await container.profileService.removeMyAvatar() }
                         }
                         .font(.footnote)
@@ -103,9 +105,6 @@ struct SettingsView: View {
     }
 
     // MARK: Notifications
-    //
-    // Its own section near the top: it used to be a row inside "Account",
-    // where it was easy to miss.
 
     private var notificationsSection: some View {
         ThemedSection {
@@ -116,7 +115,7 @@ struct SettingsView: View {
                     Label("Notifications (ntfy)", systemImage: "bell.badge")
                     Spacer()
                     Text(container.ntfyService.isEnabled ? "On" : "Off")
-                        .foregroundStyle(.secondary)
+                        .themedSecondary()
                 }
             }
         } header: {
@@ -140,8 +139,10 @@ struct SettingsView: View {
                     Label("Account recovery", systemImage: "lifepreserver")
                     Spacer()
                     if container.recoveryService.emailStatus?.verified != true {
+                        // The shape (a "!" in a circle) carries the meaning; the
+                        // colour only adds to it on the default look.
                         Image(systemName: "exclamationmark.circle.fill")
-                            .foregroundStyle(.orange)
+                            .themedStatus(.warning)
                             .accessibilityLabel("Not set up")
                     }
                 }
@@ -209,7 +210,7 @@ struct SettingsView: View {
                     Spacer()
                     if container.alarmService.enabledCount > 0 {
                         Text("\(container.alarmService.enabledCount) on")
-                            .foregroundStyle(.secondary)
+                            .themedSecondary()
                     }
                 }
             }
@@ -220,7 +221,7 @@ struct SettingsView: View {
         ThemedSection("Sync") {
             LabeledContent("Connection") {
                 Text(container.messagingService.isListening ? "Connected" : "Not connected")
-                    .foregroundStyle(container.messagingService.isListening ? .green : .orange)
+                    .themedStatus(container.messagingService.isListening ? .success : .warning)
             }
             if !container.messagingService.isListening {
                 Button("Reconnect") {
@@ -251,7 +252,7 @@ struct SettingsView: View {
 
     private var dangerSection: some View {
         ThemedSection {
-            Button("Delete Account and All Data", role: .destructive) {
+            ThemedRowButton(title: "Delete Account and All Data", isDestructive: true) {
                 showDeleteConfirmation = true
             }
         } header: {

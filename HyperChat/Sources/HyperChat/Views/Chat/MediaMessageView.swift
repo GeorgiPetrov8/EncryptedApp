@@ -1,16 +1,15 @@
 import SwiftUI
 
-/// Displays an inline image for a media message, decrypting lazily and
-/// caching the result so re-rendering during scroll doesn't re-decrypt.
+/// Displays an inline image for a media message, decrypting lazily and caching
+/// the result so re-rendering during scroll doesn't re-decrypt.
 ///
-/// Deliberately takes a `mediaLoader` closure rather than a reference to
-/// `ChatViewModel`/`MessagingService` directly — this keeps the view
-/// trivially previewable and testable in isolation, and keeps
-/// `MessageBubbleView` (which embeds this) from having to know anything
-/// about how decryption actually happens.
+/// Takes a `mediaLoader` closure rather than a reference to the view model, so the
+/// view stays previewable and `MessageBubbleView` knows nothing about decryption.
 struct MediaMessageView: View {
     let messageId: String
     let mediaLoader: (String) async -> Data?
+
+    @Environment(\.appTheme) private var theme
 
     @State private var image: UIImage?
     @State private var isLoading = false
@@ -23,10 +22,8 @@ struct MediaMessageView: View {
 
     var body: some View {
         content
-            // Keyed by messageId: if this view instance is ever reused for a
-            // different message (SwiftUI does this more than you'd expect
-            // inside a LazyVStack), the task restarts instead of silently
-            // showing the previous message's cached image.
+            // Keyed by messageId: if this view instance is reused for another
+            // message, the task restarts instead of showing the old image.
             .task(id: messageId) { await load() }
     }
 
@@ -48,24 +45,27 @@ struct MediaMessageView: View {
                 FullScreenImageViewer(image: image) { showFullScreen = false }
             }
         } else if failed {
-            placeholder(systemImage: "exclamationmark.triangle", label: "Couldn't load photo", tint: .orange)
+            placeholder(systemImage: "exclamationmark.triangle", label: "Couldn't load photo", isWarning: true)
         } else {
-            placeholder(systemImage: "photo", label: isLoading ? "Loading…" : "Photo", tint: .secondary)
+            placeholder(systemImage: "photo", label: isLoading ? "Loading…" : "Photo", isWarning: false)
         }
     }
 
-    private func placeholder(systemImage: String, label: String, tint: Color) -> some View {
+    /// FIX: the placeholder used `secondarySystemBackground` and grey text, so it
+    /// looked like a different surface from the bubbles around it. It now uses the
+    /// incoming-bubble colours of the chat's theme.
+    private func placeholder(systemImage: String, label: String, isWarning: Bool) -> some View {
         VStack(spacing: 6) {
             if isLoading {
                 ProgressView()
             } else {
                 Image(systemName: systemImage).font(.title2)
             }
-            Text(label).font(.caption)
+            Text(label).font(.caption.weight(theme.isCustom ? .semibold : .regular))
         }
-        .foregroundStyle(tint)
+        .foregroundStyle(isWarning && !theme.isCustom ? Color.orange : theme.text)
         .frame(width: 160, height: 160)
-        .background(Color(.secondarySystemBackground))
+        .background(theme.incomingBubbleFill)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
 
@@ -86,9 +86,7 @@ struct MediaMessageView: View {
     }
 }
 
-/// Tap-to-view full screen, with pinch-to-zoom and double-tap-to-reset —
-/// small additions on top of the minimum "show the picture bigger", but
-/// cheap once the image is already decrypted and in memory.
+/// Tap-to-view full screen, with pinch-to-zoom and double-tap-to-reset.
 private struct FullScreenImageViewer: View {
     let image: UIImage
     let onDismiss: () -> Void

@@ -22,6 +22,8 @@ struct ChatView: View {
 
     /// Message the full emoji picker is open for.
     @State private var reactionTarget: DisplayMessage?
+    
+    @State private var didInitialScroll = false
 
     init(container: AppContainer, conversation: Conversation) {
         self.container = container
@@ -261,19 +263,46 @@ struct ChatView: View {
                         )
                         .id(message.id)
                     }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.bottomID)
                 }
                 .padding(.horizontal)
                 .padding(.top, 14)
                 .padding(.bottom, 8)
             }
+            .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            .onAppear {
+                scrollToBottom(proxy, animated: false)
+            }
             .onChange(of: viewModel.messages.count) { _, _ in
-                guard let last = viewModel.messages.last else { return }
-                withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                if didInitialScroll {
+                    scrollToBottom(proxy, animated: true)
+                } else if !viewModel.messages.isEmpty {
+                    // Първото зареждане: без анимация.
+                    scrollToBottom(proxy, animated: false)
+                    didInitialScroll = true
+                }
             }
         }
     }
 
+    private static let bottomID = "chat-bottom-anchor"
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        // Два пъти: веднага и след като LazyVStack измери редовете.
+        let action = {
+            if animated {
+                withAnimation { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            } else {
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+            }
+        }
+        action()
+        DispatchQueue.main.async { action() }
+    }
+    
     // MARK: Bottom bar
 
     private var bottomBar: some View {

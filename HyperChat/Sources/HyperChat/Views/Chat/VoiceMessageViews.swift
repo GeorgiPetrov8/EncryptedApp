@@ -90,7 +90,12 @@ struct VoiceRecordButton: View {
     private func begin() {
         switch recorder.permissionStatus {
         case .granted:
-            recorder.start()
+            do {
+                try recorder.start()
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } catch {
+                print("Failed to start voice recording: \(error)")
+            }
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         case .denied:
             permissionDenied = true
@@ -104,19 +109,28 @@ struct VoiceRecordButton: View {
     }
 }
 
+
 /// Shown in place of the text field while recording.
 struct VoiceRecordingBar: View {
     @ObservedObject var recorder: VoiceRecorder
 
     var body: some View {
         HStack(spacing: 10) {
-            RecordingDot(isPaused: recorder.isPaused)
+            RecordingDot(
+                isPaused: recorder.isPaused,
+                isCapturing: recorder.isCapturing
+            )
 
-            Text(timeString(recorder.duration))
-                .font(.system(.body, design: .monospaced))
-                .monospacedDigit()
+            if !recorder.isCapturing {
+                Text("Starting…")
+                    .font(.caption2)
+            } else {
+                Text(timeString(recorder.duration))
+                    .font(.system(.body, design: .monospaced))
+                    .monospacedDigit()
+            }
 
-            LiveWaveform(levels: recorder.recentLevels, isPaused: recorder.isPaused)
+            LiveWaveform(levels: recorder.recentLevels, isPaused: recorder.isPaused || !recorder.isCapturing)
 
             Spacer(minLength: 4)
 
@@ -140,15 +154,23 @@ struct VoiceRecordingBar: View {
 
 private struct RecordingDot: View {
     let isPaused: Bool
+    let isCapturing: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: isPaused)) { context in
+        // Докато още не записва – статична и бледа точка (новото поведение).
+        // Иначе – старото пулсиране.
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: isPaused || !isCapturing)) { context in
             let phase = context.date.timeIntervalSinceReferenceDate
-            let pulse = isPaused ? 0.3 : 0.55 + 0.45 * abs(sin(phase * 3))
+            let opacity: Double = {
+                if !isCapturing { return 0.25 }
+                if isPaused { return 0.3 }
+                return 0.55 + 0.45 * abs(sin(phase * 3))
+            }()
+
             Circle()
                 .fill(.red)
                 .frame(width: 9, height: 9)
-                .opacity(pulse)
+                .opacity(opacity)
         }
     }
 }
@@ -160,7 +182,6 @@ private struct LiveWaveform: View {
     let isPaused: Bool
 
     var body: some View {
-        // 30 fps is plenty for this and halves the work of a 120 Hz screen.
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: isPaused)) { context in
             let phase = context.date.timeIntervalSinceReferenceDate
             HStack(spacing: 2) {
@@ -206,16 +227,19 @@ struct LockedRecordingControls: View {
                 Image(systemName: recorder.isPaused ? "mic.circle" : "pause.circle")
                     .font(.title2)
             }
+            .disabled(!recorder.isCapturing)
             .accessibilityLabel(recorder.isPaused ? "Resume recording" : "Pause recording")
 
             Button {
-                if let recorded = recorder.stop() {
+                if let recorded = recorder.send() {
                     onSend(recorded)
                 }
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.title)
             }
+            .disabled(!recorder.isCapturing)
+            .opacity(recorder.isCapturing ? 1 : 0.4)
             .accessibilityLabel("Send voice message")
         }
     }

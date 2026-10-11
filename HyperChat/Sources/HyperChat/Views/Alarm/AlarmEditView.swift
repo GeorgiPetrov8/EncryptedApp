@@ -38,10 +38,7 @@ struct AlarmEditView: View {
                     DatePicker(
                         selection: $time,
                         displayedComponents: .hourAndMinute
-                    ) {
-                        Text("Time")
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
+                    ) {}
                     .datePickerStyle(.wheel)
 
                     TextField("Label", text: $label)

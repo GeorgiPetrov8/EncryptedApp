@@ -673,8 +673,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
-				TargetAttributes = {
-				};
 			};
 			buildConfigurationList = FA676240F24BCE7E91DB1002 /* Build configuration list for PBXProject "HyperChat" */;
 			developmentRegion = en;

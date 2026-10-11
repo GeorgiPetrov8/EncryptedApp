@@ -59,6 +59,14 @@ struct AppTheme: Equatable {
 
     var incomingBubbleFill: Color { surface ?? Color(.secondarySystemBackground) }
 
+    /// Placeholder text ("you@example.com", "Message"). A text field's placeholder
+    /// ignores `foregroundStyle` and is always system grey, which disappears on a
+    /// coloured row. 85% of the text colour keeps >= 3.65:1 on every surface
+    /// (measured over the whole colour cube); typed text is full strength.
+    var placeholder: Color { isCustom ? text.opacity(0.85) : Color(.placeholderText) }
+
+    func prompt(_ title: String) -> Text { Text(title).foregroundStyle(placeholder) }
+
     /// Fill for text fields and inset boxes. Moved *away* from the text colour,
     /// so contrast can only improve.
     var fieldFill: Color {

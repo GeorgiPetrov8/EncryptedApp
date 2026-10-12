@@ -1,0 +1,22 @@
+# macOS / Xcode
+.DS_Store
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+ios/HyperChat.xcodeproj/
+/HyperChat.xcodeproj/
+
+# Server
+server/node_modules/
+server/.env
+server/env.env
+server/data/*
+!server/data/.gitkeep
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Keys and certificates
+*.p8
+*.pem

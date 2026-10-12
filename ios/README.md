@@ -1,4 +1,4 @@
-# HyperChat (scaffold)
+# SecureHyperChat (scaffold)
 
 An end-to-end encrypted messaging app scaffold for iOS: SwiftUI, a from-scratch
 X3DH + Double Ratchet crypto layer built on CryptoKit, a GRDB-backed local
@@ -39,7 +39,7 @@ without standing up a real server.
 | Mock backend + mock WebSocket (zero-knowledge: ciphertext only) | `Networking/` |
 | Auth, messaging orchestration, media encryption, app lock | `Services/` |
 | SwiftUI screens: login/register, chat list, chat, settings, app lock | `Views/` |
-| Crypto round-trip unit tests | `Tests/HyperChatTests/CryptoTests.swift` |
+| Crypto round-trip unit tests | `Tests/SecureHyperChatTests/CryptoTests.swift` |
 
 ### A deliberate design change from the original spec
 
@@ -65,10 +65,10 @@ later if you need whole-file encryption too.
 
 1. Install [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 2. From this folder: `xcodegen generate`
-3. `open HyperChat.xcodeproj`
+3. `open SecureHyperChat.xcodeproj`
 4. Let Xcode resolve the GRDB Swift Package (Signing & Capabilities may also
    prompt you to pick a team — any personal team works for simulator builds).
-5. Signing & Capabilities → enable **Data Protection** on the `HyperChat`
+5. Signing & Capabilities → enable **Data Protection** on the `SecureHyperChat`
    target (needed for the `NSFileProtectionCompleteUntilFirstUserAuthentication`
    setting on the local database file to take effect).
 6. Build & run on a simulator or device (iOS 16+).
@@ -84,7 +84,7 @@ later if you need whole-file encryption too.
 
 `Cmd+U` in Xcode, or:
 ```
-xcodebuild test -project HyperChat.xcodeproj -scheme HyperChat -destination 'platform=iOS Simulator,name=iPhone 15'
+xcodebuild test -project SecureHyperChat.xcodeproj -scheme SecureHyperChat -destination 'platform=iOS Simulator,name=iPhone 15'
 ```
 
 ## Next steps if you take this further

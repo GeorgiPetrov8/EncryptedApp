@@ -2,7 +2,7 @@ import Foundation
 
 /// The tiny protocol between the screen-share extension and the app.
 ///
-/// **Add this file to BOTH targets** (HyperChat and HyperChatScreenShare).
+/// **Add this file to BOTH targets** (SecureHyperChat and SecureHyperChatScreenShare).
 ///
 /// The extension runs in its own process, so it needs a way to hand frames to
 /// the app. Apple's usual answer is an App Group, but App Groups don't work

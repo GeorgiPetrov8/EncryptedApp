@@ -44,7 +44,7 @@ function testNtfyRoute(store, limiters, ntfy) {
     const topic = ntfy.topicFor(req.userId);
     if (!topic) return sendError(res, 409, 'notEnabled', 'Turn notifications on first.');
     const sent = await ntfy.publish(topic, {
-      title: 'HyperChat',
+      title: 'SecureHyperChat',
       body: 'Notifications are working.',
       tags: 'white_check_mark',
     });

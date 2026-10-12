@@ -177,7 +177,7 @@ server.listen(0, async () => {
       const push = seen.find((s) => s.headers[':path'].endsWith('ab'.repeat(32)));
       assert.equal(push.headers['apns-topic'], 'com.hyperchat.app');
       assert.match(push.headers.authorization, /^bearer /);
-      assert.deepEqual(push.body.aps.alert, { title: 'HyperChat', body: 'New message' });
+      assert.deepEqual(push.body.aps.alert, { title: 'SecureHyperChat', body: 'New message' });
       assert.equal(JSON.stringify(push.body).includes('ratchet'), false, 'no message content in push');
       assert.equal(store.stmt.deviceTokensForUser.all('u3').length, 1, '410 token removed');
     });

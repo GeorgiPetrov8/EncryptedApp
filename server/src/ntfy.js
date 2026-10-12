@@ -4,9 +4,9 @@
  * Opt-in notifications through ntfy (https://ntfy.sh), for builds without
  * Apple push (free developer accounts / SideStore).
  *
- * The user installs the ntfy app, subscribes to a random topic HyperChat
+ * The user installs the ntfy app, subscribes to a random topic SecureHyperChat
  * generated for them, and the server posts a generic "New message" to that
- * topic when something arrives while HyperChat is closed. The message text
+ * topic when something arrives while SecureHyperChat is closed. The message text
  * is never sent — ntfy only learns *that* something arrived.
  *
  * Self-contained: creates its own table, so db.js doesn't change.
@@ -23,12 +23,12 @@ const TOPIC_RE = /^[A-Za-z0-9_-]{20,64}$/;
 const THROTTLE_MS = 30 * 1000;
 
 const ALERTS = {
-  text: { title: 'HyperChat', body: 'New message', tags: 'speech_balloon' },
-  image: { title: 'HyperChat', body: 'New photo', tags: 'camera' },
-  video: { title: 'HyperChat', body: 'New video', tags: 'movie_camera' },
-  file: { title: 'HyperChat', body: 'New attachment', tags: 'paperclip' },
-  invite: { title: 'HyperChat', body: 'New chat invitation', tags: 'wave' },
-  call: { title: 'HyperChat', body: 'Incoming call', tags: 'telephone_receiver', priority: '5' },
+  text: { title: 'SecureHyperChat', body: 'New message', tags: 'speech_balloon' },
+  image: { title: 'SecureHyperChat', body: 'New photo', tags: 'camera' },
+  video: { title: 'SecureHyperChat', body: 'New video', tags: 'movie_camera' },
+  file: { title: 'SecureHyperChat', body: 'New attachment', tags: 'paperclip' },
+  invite: { title: 'SecureHyperChat', body: 'New chat invitation', tags: 'wave' },
+  call: { title: 'SecureHyperChat', body: 'Incoming call', tags: 'telephone_receiver', priority: '5' },
   // Background bookkeeping — never notified.
   receipt: null,
   profile: null,
@@ -82,7 +82,7 @@ class Ntfy {
     const headers = {
       Title: title,
       Tags: tags,
-      // Tapping the notification opens HyperChat (needs the `hyperchat` URL
+      // Tapping the notification opens SecureHyperChat (needs the `hyperchat` URL
       // scheme registered in the app; otherwise it opens ntfy).
       Click: 'hyperchat://',
     };

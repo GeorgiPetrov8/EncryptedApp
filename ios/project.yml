@@ -1,14 +1,14 @@
 # ios/project.yml
 #
 # Generate the Xcode project with:   cd ios && xcodegen generate
-# ios/HyperChat.xcodeproj is generated output and is git-ignored. This file
+# ios/SecureHyperChat.xcodeproj is generated output and is git-ignored. This file
 # is the single source of truth for targets, schemes and build settings.
 #
 # All paths below are relative to this file (ios/).
 
-name: HyperChat
+name: SecureHyperChat
 options:
-  bundleIdPrefix: com.HyperChat
+  bundleIdPrefix: com.SecureHyperChat
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
@@ -18,7 +18,7 @@ settings:
     SWIFT_VERSION: "5.9"
     # GIF provider. Put your key from partner.klipy.com here (or in Xcode ->
     # Build Settings -> User-Defined). Never commit a real key.
-    GIF_API_KEY: ""
+    GIF_API_KEY: "1VLFh7l2O4NQuZCow7ry79l9xW1mEVd12bbXzQBwbR7KMScxHnlPJ24EhsGzgWJB"
     GIF_API_HOST: "api.klipy.com"
   configs:
     Debug:
@@ -37,11 +37,11 @@ packages:
     branch: latest
 
 targets:
-  HyperChat:
+  SecureHyperChat:
     type: application
     platform: iOS
     sources:
-      - path: HyperChat
+      - path: SecureHyperChat
         excludes:
           - Resources/Info.plist
           # The catalog was not part of the target before the restructure.
@@ -56,22 +56,22 @@ targets:
         product: GRDB
       - package: WebRTC
         product: WebRTC
-      - target: HyperChatScreenShare
+      - target: SecureHyperChatScreenShare
         embed: true
     info:
-      path: HyperChat/Resources/Info.plist
+      path: SecureHyperChat/Resources/Info.plist
       properties:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        NSCameraUsageDescription: "HyperChat needs camera access to capture photos and videos to send in encrypted messages."
-        NSPhotoLibraryUsageDescription: "HyperChat needs photo library access to attach images and videos to encrypted messages."
+        NSCameraUsageDescription: "SecureHyperChat needs camera access to capture photos and videos to send in encrypted messages."
+        NSPhotoLibraryUsageDescription: "SecureHyperChat needs photo library access to attach images and videos to encrypted messages."
         # Needed for "Save Image" / "Save Video" from the share sheet. Without
         # it iOS terminates the app on the first save.
-        NSPhotoLibraryAddUsageDescription: "HyperChat saves photos and videos you choose to your library."
-        NSMicrophoneUsageDescription: "HyperChat needs microphone access for calls and voice messages."
-        NSFaceIDUsageDescription: "HyperChat uses Face ID to protect access to your conversations."
-        NSPhotoLibraryAddUsageDescription: "HyperChat saves photos and videos you choose to your library."
+        NSPhotoLibraryAddUsageDescription: "SecureHyperChat saves photos and videos you choose to your library."
+        NSMicrophoneUsageDescription: "SecureHyperChat needs microphone access for calls and voice messages."
+        NSFaceIDUsageDescription: "SecureHyperChat uses Face ID to protect access to your conversations."
+        NSPhotoLibraryAddUsageDescription: "SecureHyperChat saves photos and videos you choose to your library."
         API_BASE_URL: "$(API_BASE_URL)"
         USE_MOCK_BACKEND: "$(USE_MOCK_BACKEND)"
         GIF_API_KEY: "$(GIF_API_KEY)"
@@ -82,55 +82,55 @@ targets:
           - audio
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.HyperChat.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.SecureHyperChat.app
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
-        CODE_SIGN_ENTITLEMENTS: HyperChat/Resources/HyperChat.entitlements
+        CODE_SIGN_ENTITLEMENTS: SecureHyperChat/Resources/SecureHyperChat.entitlements
 
   # Broadcast Upload Extension for screen sharing.
-  HyperChatScreenShare:
+  SecureHyperChatScreenShare:
     type: app-extension
     platform: iOS
     sources:
-      - path: HyperChatScreenShare
+      - path: SecureHyperChatScreenShare
         excludes:
           - Info.plist
           - "*.entitlements"
       - path: Shared/ScreenShareWire.swift
     info:
-      path: HyperChatScreenShare/Info.plist
+      path: SecureHyperChatScreenShare/Info.plist
       properties:
-        CFBundleDisplayName: "HyperChat Screen Share"
+        CFBundleDisplayName: "SecureHyperChat Screen Share"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.broadcast-services-upload
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).SampleHandler"
           RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.HyperChat.app.HyperChatScreenShare
+        PRODUCT_BUNDLE_IDENTIFIER: com.SecureHyperChat.app.SecureHyperChatScreenShare
 
-  HyperChatTests:
+  SecureHyperChatTests:
     type: bundle.unit-test
     platform: iOS
     sources:
-      - path: Tests/HyperChatTests
+      - path: Tests/SecureHyperChatTests
     dependencies:
-      - target: HyperChat
+      - target: SecureHyperChat
 
 schemes:
-  HyperChat:
+  SecureHyperChat:
     build:
       targets:
-        HyperChat: all
+        SecureHyperChat: all
     run:
       config: Debug
     test:
       config: Debug
       targets:
-        - HyperChatTests
-  HyperChat-Mock:
+        - SecureHyperChatTests
+  SecureHyperChat-Mock:
     build:
       targets:
-        HyperChat: all
+        SecureHyperChat: all
     run:
       config: Debug
       environmentVariables:
@@ -138,4 +138,4 @@ schemes:
     test:
       config: Debug
       targets:
-        - HyperChatTests
+        - SecureHyperChatTests

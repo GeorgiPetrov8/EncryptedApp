@@ -81,7 +81,7 @@ async function main() {
       assert.equal(await ntfy.notifyForEnvelope(env('text'), presence), true);
       const sent = received.at(-1);
       assert.equal(sent.body, 'New message');
-      assert.equal(sent.headers.title, 'HyperChat');
+      assert.equal(sent.headers.title, 'SecureHyperChat');
       assert.equal(sent.headers.click, 'hyperchat://');
     });
 

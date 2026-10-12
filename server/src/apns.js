@@ -16,7 +16,7 @@ const fs = require('node:fs');
  *   APNS_KEY_PATH  path to the AuthKey_XXXXXXXXXX.p8 file from Apple
  *   APNS_KEY_ID    the 10-character key id
  *   APNS_TEAM_ID   your 10-character Apple team id
- *   APNS_TOPIC     the app's bundle id, e.g. com.hyperchat.app
+ *   APNS_TOPIC     the app's bundle id, e.g. com.georgipetrov.securehyperchat
  * Without them push is disabled and everything else keeps working.
  */
 
@@ -31,12 +31,12 @@ const JWT_LIFETIME_MS = 50 * 60 * 1000;
 
 /** What each content type looks like on the lock screen. `null` = no push. */
 const ALERTS = {
-  text: { title: 'HyperChat', body: 'New message' },
-  image: { title: 'HyperChat', body: 'New photo' },
-  video: { title: 'HyperChat', body: 'New video' },
-  file: { title: 'HyperChat', body: 'New attachment' },
-  invite: { title: 'HyperChat', body: 'New chat invitation' },
-  call: { title: 'HyperChat', body: 'Incoming call' },
+  text: { title: 'SecureHyperChat', body: 'New message' },
+  image: { title: 'SecureHyperChat', body: 'New photo' },
+  video: { title: 'SecureHyperChat', body: 'New video' },
+  file: { title: 'SecureHyperChat', body: 'New attachment' },
+  invite: { title: 'SecureHyperChat', body: 'New chat invitation' },
+  call: { title: 'SecureHyperChat', body: 'Incoming call' },
   // Background bookkeeping — pushing these would be pure noise.
   receipt: null,
   profile: null,

@@ -168,15 +168,15 @@ function setEmailRoute(store, limiters) {
     const account = store.stmt.accountById.get(req.userId);
     await mailer.sendMail({
       to: email,
-      subject: 'HyperChat verification code',
-      text: `Your HyperChat code is ${code}.\nIt expires in 10 minutes. If you didn't ask for it, ignore this email.`,
+      subject: 'SecureHyperChat verification code',
+      text: `Your SecureHyperChat code is ${code}.\nIt expires in 10 minutes. If you didn't ask for it, ignore this email.`,
     });
 
     const current = store.stmt.emailForUser.get(req.userId);
     if (current && current.verified === 1 && current.email !== email) {
       await mailer.sendMail({
         to: current.email,
-        subject: 'HyperChat recovery email change requested',
+        subject: 'SecureHyperChat recovery email change requested',
         text: `Someone signed in as "${account.username}" asked to change the recovery email to ${maskEmail(email)}.\nIf that wasn't you, your phone may be in someone else's hands.`,
       });
     }
@@ -241,7 +241,7 @@ function uploadBackupRoute(store, limiters) {
     // The client format starts with the magic "HCBK". Anything else is not
     // a backup — refusing it stops the endpoint being used as free storage.
     if (data.length < 64 || data.subarray(0, 4).toString('latin1') !== 'HCBK') {
-      return sendError(res, 400, 'badRequest', 'Not a HyperChat backup.');
+      return sendError(res, 400, 'badRequest', 'Not a SecureHyperChat backup.');
     }
     store.stmt.upsertBackup.run(req.userId, data, data.length, nowIso());
     res.writeHead(204).end();
@@ -281,8 +281,8 @@ function startRecoveryRoute(store, limiters) {
       if (code) {
         await mailer.sendMail({
           to: email.email,
-          subject: 'HyperChat account recovery',
-          text: `Your HyperChat recovery code is ${code}.\nIt expires in 10 minutes.\nIf you didn't try to recover "${account.username}", ignore this email — nobody can get in without the code.`,
+          subject: 'SecureHyperChat account recovery',
+          text: `Your SecureHyperChat recovery code is ${code}.\nIt expires in 10 minutes.\nIf you didn't try to recover "${account.username}", ignore this email — nobody can get in without the code.`,
         });
       }
     }
@@ -388,7 +388,7 @@ function rebindRoute(store, limiters) {
     if (email) {
       await mailer.sendMail({
         to: email.email,
-        subject: 'HyperChat account recovered on a new device',
+        subject: 'SecureHyperChat account recovered on a new device',
         text: `"${account.username}" was recovered on a new device with new security keys.\nIf this wasn't you, contact support immediately.`,
       });
     }

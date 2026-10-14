@@ -1,0 +1,47 @@
+# Two services: the relay, and Caddy in front of it for automatic TLS.
+#
+# Setup:
+#   cp .env.example .env      # then fill it in
+#   mkdir keys                # put AuthKey_XXXX.p8 here only if you use Apple push
+#   docker compose up --build -d
+#
+# For local development you don't need Docker: `npm start` and point the
+# app's API_BASE_URL at http://127.0.0.1:8080.
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    # Everything configurable (mail, push, secrets) comes from .env — before
+    # this, none of it reached the container, so email and APNs were silently off.
+    env_file: .env
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - DB_PATH=/app/data/securechat.sqlite
+      # Only because Caddy is in front. Never set this if the server is
+      # reachable directly — see src/rateLimit.js.
+      - TRUST_PROXY=1
+    volumes:
+      - securechat-data:/app/data
+      - ./keys:/run/keys:ro
+    expose:
+      - "8080"
+    # No `ports:` mapping on purpose: only Caddy talks to this service.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - server
+
+volumes:
+  securechat-data:
+  caddy-data:
+  caddy-config:

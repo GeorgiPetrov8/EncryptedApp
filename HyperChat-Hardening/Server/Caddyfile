@@ -1,0 +1,19 @@
+# Replace with your real domain. Caddy obtains and renews the certificate by
+# itself, and redirects http:// to https:// for this name.
+chat.your-domain.com {
+	# WebSocket upgrades are proxied transparently.
+	#
+	# No `header_up X-Forwarded-For` here:
+	#   - `header_up` is only valid INSIDE `reverse_proxy { }`, so the old
+	#     top-level line stopped Caddy from loading the file at all;
+	#   - Caddy already sets X-Forwarded-For to the client's IP, and the
+	#     `{http.request.remote}` placeholder it was set to includes the port,
+	#     which gave every connection its own rate-limit bucket.
+	reverse_proxy server:8080
+
+	encode gzip
+
+	# No access log on purpose. Logged request headers would include
+	# X-Recovery-Ticket, which is valid for 15 minutes and lets whoever reads
+	# the log replace the account's keys.
+}

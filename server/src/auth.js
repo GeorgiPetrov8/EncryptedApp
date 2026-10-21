@@ -7,26 +7,16 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const TOKEN_BYTES = 32; // 256-bit opaque bearer token
 
 /**
- * Opaque bearer tokens, not JWTs.
- *
- * A JWT would let the server validate a session without a database round
- * trip, but it can't be revoked short of a blocklist — which needs a
- * database anyway, defeating the point. An opaque token looked up against a
- * `sessions` table costs one indexed read per request and is trivially
- * revocable (delete the row), which matters here because logout, and any
- * future "sign out other devices" feature, must actually take effect
- * immediately rather than waiting out a token's expiry.
- *
- * Only the SHA-256 hash of the token is stored, matching how you'd store an
- * API key or a password: if the `sessions` table leaks, the tokens
- * themselves aren't directly reusable from the dump.
+ * Opaque bearer tokens, not JWTs: one indexed read per request, and trivially
+ * revocable (delete the row), which logout and account recovery rely on. Only
+ * the SHA-256 hash is stored, so a leaked `sessions` table holds no usable
+ * tokens.
  */
 function issueToken(store, userId) {
   const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
-  const tokenHash = hashToken(token);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
-  store.stmt.insertSession.run(tokenHash, userId, now.toISOString(), expiresAt.toISOString());
+  store.stmt.insertSession.run(hashToken(token), userId, now.toISOString(), expiresAt.toISOString());
   return token;
 }
 
@@ -36,11 +26,17 @@ function hashToken(token) {
 
 /** Returns the userId for a valid, unexpired token, or null. */
 function resolveToken(store, token) {
-  if (typeof token !== 'string' || token.length === 0) return null;
+  if (typeof token !== 'string' || token.length === 0 || token.length > 256) return null;
   const row = store.stmt.sessionByHash.get(hashToken(token));
   if (!row) return null;
   if (new Date(row.expires_at).getTime() < Date.now()) return null;
   return row.user_id;
+}
+
+/** Deletes one session. Returns true if it existed. */
+function revokeToken(store, token) {
+  if (typeof token !== 'string' || !token) return false;
+  return store.stmt.deleteSessionByHash.run(hashToken(token)).changes > 0;
 }
 
 function extractBearerToken(req) {
@@ -50,14 +46,12 @@ function extractBearerToken(req) {
 }
 
 /**
- * Express-style middleware, adapted for the hand-rolled router in
- * `router.js`. On success sets `req.userId`; on failure writes the 401
- * response itself and returns `false` so the caller can bail out early.
+ * Middleware for the hand-rolled router: on success sets `req.userId`; on
+ * failure writes the 401 itself and returns `false`.
  */
 function requireAuth(store) {
   return function authMiddleware(req, res) {
-    const token = extractBearerToken(req);
-    const userId = resolveToken(store, token);
+    const userId = resolveToken(store, extractBearerToken(req));
     if (!userId) {
       sendError(res, 401, 'notAuthenticated', 'Missing or invalid session token');
       return false;
@@ -71,4 +65,6 @@ function pruneExpiredSessions(store) {
   store.stmt.deleteExpiredSessions.run(nowIso());
 }
 
-module.exports = { issueToken, resolveToken, extractBearerToken, requireAuth, pruneExpiredSessions };
+module.exports = {
+  issueToken, resolveToken, revokeToken, hashToken, extractBearerToken, requireAuth, pruneExpiredSessions,
+};

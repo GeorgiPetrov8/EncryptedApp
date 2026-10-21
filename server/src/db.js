@@ -5,13 +5,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 /**
- * Schema and prepared-statement layer. Zero third-party dependencies.
+ * Schema and prepared-statement layer. No third-party dependencies.
  *
- * Additions in this version:
- *   retired_usernames — names of deleted accounts, never handed out again
- *                       (otherwise a stranger could re-register "maria" and
- *                       inherit her contacts' trust)
- *   device_tokens     — APNs device tokens for push notifications
+ * This version adds:
+ *   pending_envelopes.received_at  — the SERVER's receive time. `created_at` is
+ *                                    chosen by the sender, so expiry can't rely on it.
+ *   media_blobs.uploader_id        — owner, for per-account quota and cleanup.
+ *   busy_timeout, re-entrant transactions, and the statements the new
+ *   limits / logout / cleanup need.
  */
 class Store {
   constructor(filePath) {
@@ -20,13 +21,24 @@ class Store {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
     }
     this.db = new DatabaseSync(filePath);
+    this._txDepth = 0;
     if (!isMemory) {
       this.db.exec('PRAGMA journal_mode = WAL');
       this.db.exec('PRAGMA synchronous = NORMAL');
     }
     this.db.exec('PRAGMA foreign_keys = ON');
+    // Wait for a competing writer instead of failing immediately with "database is locked".
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this._migrate();
     this._prepare();
+  }
+
+  /** Adds a column to an existing table; `CREATE TABLE IF NOT EXISTS` won't. */
+  _addColumnIfMissing(table, column, definition) {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   _migrate() {
@@ -77,8 +89,8 @@ class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_invites_sender_created ON invites(sender_id, created_at);
 
-      -- Durable per-recipient queue. Rows are deleted on ack: the server
-      -- relays, it does not retain.
+      -- Durable per-recipient queue. Rows are deleted on ack (or on expiry):
+      -- the server relays, it does not archive.
       CREATE TABLE IF NOT EXISTS pending_envelopes (
         sequence         INTEGER PRIMARY KEY AUTOINCREMENT,
         envelope_id      TEXT NOT NULL,
@@ -90,21 +102,22 @@ class Store {
         ratchet_message  TEXT NOT NULL,
         content_type     TEXT NOT NULL,
         created_at       TEXT NOT NULL,
+        received_at      TEXT,
         UNIQUE (recipient_id, sender_id, envelope_id)
       );
       CREATE INDEX IF NOT EXISTS idx_pending_recipient_seq ON pending_envelopes(recipient_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_pending_recipient_conversation ON pending_envelopes(recipient_id, conversation_id);
 
       CREATE TABLE IF NOT EXISTS media_blobs (
-        media_id   TEXT PRIMARY KEY,
-        data       BLOB NOT NULL,
-        size_bytes INTEGER NOT NULL,
-        created_at TEXT NOT NULL
+        media_id    TEXT PRIMARY KEY,
+        data        BLOB NOT NULL,
+        size_bytes  INTEGER NOT NULL,
+        created_at  TEXT NOT NULL,
+        uploader_id TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_media_blobs_created ON media_blobs(created_at);
 
       -- ---------------- Account recovery ----------------
-
       CREATE TABLE IF NOT EXISTS account_emails (
         user_id    TEXT PRIMARY KEY,
         email      TEXT NOT NULL,
@@ -141,14 +154,12 @@ class Store {
       );
 
       -- ---------------- Account deletion ----------------
-
       CREATE TABLE IF NOT EXISTS retired_usernames (
         username   TEXT PRIMARY KEY COLLATE NOCASE,
         retired_at TEXT NOT NULL
       );
 
       -- ---------------- Push notifications ----------------
-
       CREATE TABLE IF NOT EXISTS device_tokens (
         token       TEXT PRIMARY KEY,
         user_id     TEXT NOT NULL,
@@ -157,6 +168,14 @@ class Store {
         FOREIGN KEY (user_id) REFERENCES accounts(user_id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens(user_id);
+    `);
+
+    // Databases created by an earlier version lack these columns.
+    this._addColumnIfMissing('pending_envelopes', 'received_at', 'TEXT');
+    this._addColumnIfMissing('media_blobs', 'uploader_id', 'TEXT');
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pending_received ON pending_envelopes(received_at);
+      CREATE INDEX IF NOT EXISTS idx_media_uploader ON media_blobs(uploader_id);
     `);
   }
 
@@ -175,6 +194,7 @@ class Store {
         UPDATE accounts SET signed_prekey_id = ?, signed_prekey = ?, signed_prekey_signature = ?
         WHERE user_id = ?
       `),
+
       insertOneTimePreKey: db.prepare(`
         INSERT OR IGNORE INTO one_time_prekeys (user_id, prekey_id, public_key) VALUES (?, ?, ?)
       `),
@@ -189,6 +209,7 @@ class Store {
         INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)
       `),
       sessionByHash: db.prepare(`SELECT * FROM sessions WHERE token_hash = ?`),
+      deleteSessionByHash: db.prepare(`DELETE FROM sessions WHERE token_hash = ?`),
       deleteExpiredSessions: db.prepare(`DELETE FROM sessions WHERE expires_at < ?`),
       deleteSessionsForUser: db.prepare(`DELETE FROM sessions WHERE user_id = ?`),
 
@@ -207,12 +228,21 @@ class Store {
         ON CONFLICT(sender_id, recipient_id) DO UPDATE SET created_at = excluded.created_at
       `),
 
+      // Returns a row only when a NEW envelope was stored; a retry of the same
+      // envelope is ignored and returns nothing.
       insertPendingEnvelope: db.prepare(`
         INSERT OR IGNORE INTO pending_envelopes
           (envelope_id, conversation_id, sender_id, recipient_id, kind,
-           handshake_json, ratchet_message, content_type, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           handshake_json, ratchet_message, content_type, created_at, received_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING sequence
+      `),
+      // A DIFFERENT sender already used this envelope id for this recipient.
+      // `ack` deletes by (recipient, id), so allowing that would let one sender's
+      // ack remove another sender's message.
+      envelopeIdClash: db.prepare(`
+        SELECT 1 AS x FROM pending_envelopes
+        WHERE recipient_id = ? AND envelope_id = ? AND sender_id <> ? LIMIT 1
       `),
       pendingSince: db.prepare(`
         SELECT * FROM pending_envelopes WHERE recipient_id = ? AND sequence > ?
@@ -224,22 +254,30 @@ class Store {
       `),
       ackEnvelope: db.prepare(`DELETE FROM pending_envelopes WHERE recipient_id = ? AND envelope_id = ?`),
       pendingCountForUser: db.prepare(`SELECT COUNT(*) AS n FROM pending_envelopes WHERE recipient_id = ?`),
+      pendingCountFromSender: db.prepare(`
+        SELECT COUNT(*) AS n FROM pending_envelopes WHERE recipient_id = ? AND sender_id = ?
+      `),
+      deleteExpiredPending: db.prepare(`
+        DELETE FROM pending_envelopes WHERE COALESCE(received_at, created_at) < ?
+      `),
 
       insertMedia: db.prepare(`
-        INSERT INTO media_blobs (media_id, data, size_bytes, created_at) VALUES (?, ?, ?, ?)
+        INSERT INTO media_blobs (media_id, data, size_bytes, created_at, uploader_id) VALUES (?, ?, ?, ?, ?)
       `),
       mediaById: db.prepare(`SELECT * FROM media_blobs WHERE media_id = ?`),
+      mediaBytesForUploader: db.prepare(`
+        SELECT COALESCE(SUM(size_bytes), 0) AS n FROM media_blobs WHERE uploader_id = ?
+      `),
+      deleteMediaForUploader: db.prepare(`DELETE FROM media_blobs WHERE uploader_id = ?`),
       deleteExpiredMedia: db.prepare(`DELETE FROM media_blobs WHERE created_at < ?`),
 
       // ---------------- Account recovery ----------------
-
       emailForUser: db.prepare(`SELECT * FROM account_emails WHERE user_id = ?`),
       upsertVerifiedEmail: db.prepare(`
         INSERT INTO account_emails (user_id, email, verified, updated_at) VALUES (?, ?, 1, ?)
         ON CONFLICT(user_id) DO UPDATE SET email = excluded.email, verified = 1, updated_at = excluded.updated_at
       `),
       deleteEmail: db.prepare(`DELETE FROM account_emails WHERE user_id = ?`),
-
       codeFor: db.prepare(`SELECT * FROM email_codes WHERE user_id = ? AND purpose = ?`),
       upsertCode: db.prepare(`
         INSERT INTO email_codes (user_id, purpose, code_hash, email, attempts, created_at, expires_at)
@@ -252,14 +290,13 @@ class Store {
         UPDATE email_codes SET attempts = attempts + 1 WHERE user_id = ? AND purpose = ?
       `),
       deleteCode: db.prepare(`DELETE FROM email_codes WHERE user_id = ? AND purpose = ?`),
-
+      deleteExpiredCodes: db.prepare(`DELETE FROM email_codes WHERE expires_at < ?`),
       insertTicket: db.prepare(`
         INSERT INTO recovery_tickets (ticket_hash, user_id, expires_at) VALUES (?, ?, ?)
       `),
       ticketByHash: db.prepare(`SELECT * FROM recovery_tickets WHERE ticket_hash = ?`),
       deleteTicket: db.prepare(`DELETE FROM recovery_tickets WHERE ticket_hash = ?`),
       deleteExpiredTickets: db.prepare(`DELETE FROM recovery_tickets WHERE expires_at < ?`),
-
       upsertBackup: db.prepare(`
         INSERT INTO backups (user_id, data, size_bytes, updated_at) VALUES (?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
@@ -268,7 +305,6 @@ class Store {
       backupForUser: db.prepare(`SELECT * FROM backups WHERE user_id = ?`),
       backupInfoForUser: db.prepare(`SELECT size_bytes, updated_at FROM backups WHERE user_id = ?`),
       deleteBackup: db.prepare(`DELETE FROM backups WHERE user_id = ?`),
-
       replaceIdentity: db.prepare(`
         UPDATE accounts SET
           identity_agreement_key = ?, identity_signing_key = ?,
@@ -279,19 +315,17 @@ class Store {
       deletePendingForRecipient: db.prepare(`DELETE FROM pending_envelopes WHERE recipient_id = ?`),
 
       // ---------------- Account deletion ----------------
-
       isUsernameRetired: db.prepare(`SELECT 1 AS x FROM retired_usernames WHERE username = ? COLLATE NOCASE`),
       retireUsername: db.prepare(`
         INSERT OR IGNORE INTO retired_usernames (username, retired_at) VALUES (?, ?)
       `),
       deletePendingFromSender: db.prepare(`DELETE FROM pending_envelopes WHERE sender_id = ?`),
       deleteInvitesForUser: db.prepare(`DELETE FROM invites WHERE sender_id = ? OR recipient_id = ?`),
-      // Cascades: prekeys, sessions, login challenges, email, codes,
-      // tickets, backup, device tokens.
+      // Cascades: prekeys, sessions, login challenges, email, codes, tickets,
+      // backup, device tokens, ntfy topic.
       deleteAccountRow: db.prepare(`DELETE FROM accounts WHERE user_id = ?`),
 
       // ---------------- Push notifications ----------------
-
       upsertDeviceToken: db.prepare(`
         INSERT INTO device_tokens (token, user_id, environment, updated_at) VALUES (?, ?, ?, ?)
         ON CONFLICT(token) DO UPDATE SET
@@ -300,18 +334,29 @@ class Store {
       deviceTokensForUser: db.prepare(`SELECT token, environment FROM device_tokens WHERE user_id = ?`),
       deleteDeviceToken: db.prepare(`DELETE FROM device_tokens WHERE token = ?`),
       deleteDeviceTokenForUser: db.prepare(`DELETE FROM device_tokens WHERE token = ? AND user_id = ?`),
+      deleteAllDeviceTokensForUser: db.prepare(`DELETE FROM device_tokens WHERE user_id = ?`),
+      deleteStaleDeviceTokens: db.prepare(`DELETE FROM device_tokens WHERE updated_at < ?`),
     };
   }
 
+  /**
+   * Runs `fn` in a transaction. Re-entrant: a nested call just runs inside the
+   * outer transaction (it used to throw "cannot start a transaction within a
+   * transaction").
+   */
   transaction(fn) {
+    if (this._txDepth > 0) return fn();
     this.db.exec('BEGIN IMMEDIATE');
+    this._txDepth = 1;
     try {
       const result = fn();
       this.db.exec('COMMIT');
       return result;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      try { this.db.exec('ROLLBACK'); } catch { /* already rolled back */ }
       throw err;
+    } finally {
+      this._txDepth = 0;
     }
   }
 

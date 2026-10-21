@@ -5,46 +5,49 @@ const http2 = require('node:http2');
 const fs = require('node:fs');
 
 /**
- * Apple Push Notification service client, zero dependencies.
+ * Apple Push Notification service client, no dependencies.
  *
- * Push is how a closed app learns that something arrived. Because messages
- * are end-to-end encrypted, the server can't say *what* arrived — only that
- * something did, from the envelope's content type (which the server sees
- * anyway). So notifications are generic: "New message", never the text.
+ * Messages are end-to-end encrypted, so the server can't say *what* arrived —
+ * only that something did, from the envelope's content type. Notifications are
+ * generic: "New message", never the text.
  *
  * Configuration (environment):
  *   APNS_KEY_PATH  path to the AuthKey_XXXXXXXXXX.p8 file from Apple
  *   APNS_KEY_ID    the 10-character key id
  *   APNS_TEAM_ID   your 10-character Apple team id
- *   APNS_TOPIC     the app's bundle id, e.g. com.georgipetrov.securehyperchat
+ *   APNS_TOPIC     the app's bundle id (com.SecureHyperChat.app)
  * Without them push is disabled and everything else keeps working.
  */
-
 const HOSTS = {
   production: 'https://api.push.apple.com',
   sandbox: 'https://api.sandbox.push.apple.com',
 };
 
-// Apple rejects tokens older than an hour and throttles refreshing more
-// often than every 20 minutes; 50 minutes sits between the two.
+// Apple rejects tokens older than an hour and throttles refreshing more often
+// than every 20 minutes; 50 minutes sits between the two.
 const JWT_LIFETIME_MS = 50 * 60 * 1000;
 
+const TITLE = 'SecureHyperChat';
 /** What each content type looks like on the lock screen. `null` = no push. */
 const ALERTS = {
-  text: { title: 'SecureHyperChat', body: 'New message' },
-  image: { title: 'SecureHyperChat', body: 'New photo' },
-  video: { title: 'SecureHyperChat', body: 'New video' },
-  file: { title: 'SecureHyperChat', body: 'New attachment' },
-  invite: { title: 'SecureHyperChat', body: 'New chat invitation' },
-  call: { title: 'SecureHyperChat', body: 'Incoming call' },
+  text: { title: TITLE, body: 'New message' },
+  image: { title: TITLE, body: 'New photo' },
+  video: { title: TITLE, body: 'New video' },
+  file: { title: TITLE, body: 'New attachment' },
+  invite: { title: TITLE, body: 'New chat invitation' },
+  call: { title: TITLE, body: 'Incoming call' },
   // Background bookkeeping — pushing these would be pure noise.
   receipt: null,
   profile: null,
   notePad: null,
   edit: null,
+  reaction: null,
 };
 
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
+
+/** A short, ASCII, fixed-length id. Apple limits ids to 64 BYTES, and sees them. */
+const opaqueId = (value) => crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 32);
 
 class APNsClient {
   constructor({ keyPem, keyId, teamId, topic, hosts = HOSTS, rejectUnauthorized = true }) {
@@ -59,15 +62,25 @@ class APNsClient {
     this.sessions = new Map();
   }
 
+  /**
+   * Returns null — with a log line — when push isn't configured OR the key file
+   * can't be used. It used to throw, so a wrong path stopped the whole server
+   * from starting instead of just switching push off.
+   */
   static fromEnv(env = process.env) {
     const { APNS_KEY_PATH, APNS_KEY_ID, APNS_TEAM_ID, APNS_TOPIC } = env;
     if (!APNS_KEY_PATH || !APNS_KEY_ID || !APNS_TEAM_ID || !APNS_TOPIC) return null;
-    return new APNsClient({
-      keyPem: fs.readFileSync(APNS_KEY_PATH, 'utf8'),
-      keyId: APNS_KEY_ID,
-      teamId: APNS_TEAM_ID,
-      topic: APNS_TOPIC,
-    });
+    try {
+      return new APNsClient({
+        keyPem: fs.readFileSync(APNS_KEY_PATH, 'utf8'),
+        keyId: APNS_KEY_ID,
+        teamId: APNS_TEAM_ID,
+        topic: APNS_TOPIC,
+      });
+    } catch (err) {
+      console.error(`[apns] push disabled: ${err.message}`);
+      return null;
+    }
   }
 
   /** ES256 provider token, cached. */
@@ -99,10 +112,7 @@ class APNsClient {
     return session;
   }
 
-  /**
-   * Sends one notification.
-   * @returns {Promise<{status: number, reason?: string}>}
-   */
+  /** @returns {Promise<{status: number, reason?: string}>} */
   send(deviceToken, environment, payload, { collapseId } = {}) {
     return new Promise((resolve) => {
       const body = JSON.stringify(payload);
@@ -124,6 +134,7 @@ class APNsClient {
         resolve({ status: 0, reason: err.message });
         return;
       }
+
       let status = 0;
       let data = '';
       request.setEncoding('utf8');
@@ -150,9 +161,9 @@ class APNsClient {
 }
 
 /**
- * Called after an envelope is queued. Pushes only if the recipient has no
- * live socket (a connected app gets it over the WebSocket instantly) and
- * the content type is user-visible. Prunes tokens Apple says are dead.
+ * Called after an envelope is queued. Pushes only if the recipient has no live
+ * socket (a connected app gets it over the WebSocket) and the content type is
+ * user-visible. Prunes tokens Apple says are dead.
  */
 async function pushForEnvelope({ apns, store, presence, envelope }) {
   if (!apns) return 0;
@@ -167,11 +178,12 @@ async function pushForEnvelope({ apns, store, presence, envelope }) {
       aps: {
         alert,
         sound: 'default',
-        'thread-id': envelope.conversationId,
+        // Hashed: this id is visible to Apple, and a raw conversation id is metadata.
+        'thread-id': opaqueId(envelope.conversationId),
       },
     }, {
       // One "new message" per conversation instead of a stack of identical ones.
-      collapseId: `${envelope.contentType}:${envelope.conversationId}`.slice(0, 64),
+      collapseId: opaqueId(`${envelope.contentType}:${envelope.conversationId}`),
     });
     if (result.status === 200) {
       sent += 1;

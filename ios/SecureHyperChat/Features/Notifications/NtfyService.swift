@@ -6,17 +6,16 @@ import os
 /// Opt-in notifications through the free ntfy app, for builds without Apple
 /// push (free developer account / SideStore).
 ///
-/// Turning it on generates a random topic for this account and gives it to
-/// the server. The user subscribes to that topic in the ntfy app; from then
-/// on the server posts a generic "New message" there whenever something
-/// arrives while SecureHyperChat is closed. Message text never leaves the device.
+/// Turning it on generates a random topic for this account and gives it to the
+/// server. The user subscribes to that topic in the ntfy app; from then on the
+/// server posts a generic "New message" there whenever something arrives while
+/// SecureHyperChat is closed. Message text never leaves the device.
 ///
 /// The topic works like a password — anyone who knows it can read the
-/// notifications (not the messages). It's 24 random characters, so it can't
-/// be guessed; it can be regenerated at any time.
+/// notifications (not the messages). It's 24 random characters, so it can't be
+/// guessed; it can be regenerated at any time.
 @MainActor
 final class NtfyService: ObservableObject {
-
     @Published private(set) var topic: String?
     @Published private(set) var isBusy = false
 
@@ -51,8 +50,8 @@ final class NtfyService: ObservableObject {
 
     // MARK: Lifecycle
 
-    /// After sign-in: show this account's setting and make sure the server
-    /// has it (it's removed from the server on logout — see `signedOut`).
+    /// After sign-in: show this account's setting and make sure the server has it
+    /// (it's removed from the server on logout — see `signedOut`).
     func signedIn() async {
         guard let userId = authService.currentUserId else { return }
         topic = defaults.string(forKey: key(userId))
@@ -60,9 +59,9 @@ final class NtfyService: ObservableObject {
         try? await upload(topic)
     }
 
-    /// On logout: stop this phone getting the signed-out account's
-    /// notifications. The topic is kept locally, so signing back in turns
-    /// them on again without re-subscribing in ntfy.
+    /// On logout: stop this phone getting the signed-out account's notifications.
+    /// The topic is kept locally, so signing back in turns them on again without
+    /// re-subscribing in ntfy.
     func signedOut(bearer: String?) {
         let wasEnabled = topic != nil
         topic = nil
@@ -92,8 +91,8 @@ final class NtfyService: ObservableObject {
         topic = nil
     }
 
-    /// New topic — if the old one was shared by mistake. The user has to
-    /// subscribe to the new one in ntfy.
+    /// New topic — if the old one was shared by mistake. The user has to subscribe
+    /// to the new one in ntfy.
     func regenerate() async throws {
         guard let userId = authService.currentUserId else { throw APIError.notAuthenticated }
         isBusy = true
@@ -120,7 +119,7 @@ final class NtfyService: ObservableObject {
 
     // MARK: Helpers
 
-    /// "hc-" + 24 random characters from a 32-letter alphabet ≈ 120 bits.
+    /// "hc-" + 24 random characters from a 31-letter alphabet ≈ 119 bits.
     static func generateTopic() -> String {
         let alphabet = Array("abcdefghjkmnpqrstuvwxyz23456789")
         var generator = SystemRandomNumberGenerator()
@@ -145,7 +144,11 @@ final class NtfyService: ObservableObject {
     }
 
     private func makeRequest(path: String, method: String, bearer: String, body: [String: String?]) -> URLRequest {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        // FIX: same construction as `RealAPIClient`. `appendingPathComponent` with a
+        // string that starts with "/" is easy to get wrong across OS versions (it can
+        // percent-encode the slashes, which the server then answers with a 404).
+        let url = URL(string: path, relativeTo: baseURL)?.absoluteURL ?? baseURL.appendingPathComponent(path)
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

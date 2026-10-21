@@ -4,8 +4,8 @@ const { isValidBase64 } = require('./json');
 
 /**
  * Server-side shape validation. The server never uses these bytes
- * cryptographically, but it can cheaply reject malformed or oversized
- * "keys" before they're stored.
+ * cryptographically, but it can cheaply reject malformed or oversized values
+ * before they're stored or relayed.
  */
 const X25519_KEY_BYTES = 32;
 const ED25519_KEY_BYTES = 32;
@@ -13,33 +13,35 @@ const ED25519_SIGNATURE_BYTES = 64;
 
 const USERNAME_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
 const USER_ID_RE = /^[a-zA-Z0-9-]{1,64}$/;
+// The app creates user ids with UUID().uuidString. Requiring that on
+// registration stops a client reserving ids like "a", or ids that collide.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const OPAQUE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
  * Every envelope content type the app sends. Keep in sync with
- * `EnvelopePayloadKind` in DTOs.swift.
- *
- * NEW: 'reaction' (emoji reactions). Without it every reaction gets a 400.
+ * `EnvelopePayloadKind` in DTOs.swift — a type missing here is rejected with
+ * 400 and the feature silently stops working.
  */
 const ALLOWED_CONTENT_TYPES = [
   'text', 'image', 'video', 'file',
   'notePad', 'receipt', 'profile', 'invite', 'call', 'edit', 'reaction',
 ];
 
-function isValidUsername(value) {
-  return typeof value === 'string' && USERNAME_RE.test(value);
-}
+const MAX_RATCHET_MESSAGE_BYTES = 256 * 1024;
+const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
+/** A message may carry a createdAt this far ahead of the server clock. */
+const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
-function isValidUserId(value) {
-  return typeof value === 'string' && USER_ID_RE.test(value);
-}
-
-function isValidUInt32(value) {
-  return Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
-}
+const isValidUsername = (v) => typeof v === 'string' && USERNAME_RE.test(v);
+const isValidUserId = (v) => typeof v === 'string' && USER_ID_RE.test(v);
+const isValidUuid = (v) => typeof v === 'string' && UUID_RE.test(v);
+const isValidOpaqueId = (v) => typeof v === 'string' && OPAQUE_ID_RE.test(v);
+const isValidUInt32 = (v) => Number.isInteger(v) && v >= 0 && v <= 0xffffffff;
 
 function validateBundleUpload(body) {
   if (!body || typeof body !== 'object') return 'malformed body';
-  if (!isValidUserId(body.userId)) return 'invalid userId';
+  if (!isValidUuid(body.userId)) return 'invalid userId';
   if (!isValidUsername(body.username)) return 'invalid username';
   if (!isValidBase64(body.identityAgreementKey, { exactByteLength: X25519_KEY_BYTES })) {
     return 'invalid identityAgreementKey';
@@ -92,24 +94,26 @@ function validateOneTimePreKeyBatch(body) {
   return null;
 }
 
-const MAX_RATCHET_MESSAGE_BYTES = 256 * 1024;
-const MAX_ENVELOPE_ID_LENGTH = 128;
-
 function validateEnvelope(body) {
   if (!body || typeof body !== 'object') return 'malformed body';
-  if (typeof body.id !== 'string' || body.id.length === 0 || body.id.length > MAX_ENVELOPE_ID_LENGTH) {
-    return 'invalid id';
-  }
-  if (typeof body.conversationId !== 'string' || body.conversationId.length === 0 || body.conversationId.length > 128) {
-    return 'invalid conversationId';
-  }
+  if (!isValidOpaqueId(body.id)) return 'invalid id';
+  if (!isValidOpaqueId(body.conversationId)) return 'invalid conversationId';
   if (!isValidUserId(body.senderId)) return 'invalid senderId';
   if (!isValidUserId(body.recipientId)) return 'invalid recipientId';
   if (body.kind !== 'handshake' && body.kind !== 'ratchet') return 'invalid kind';
-  if (!isValidBase64(body.ratchetMessage) || Buffer.from(body.ratchetMessage, 'base64').length > MAX_RATCHET_MESSAGE_BYTES) {
+  if (!isValidBase64(body.ratchetMessage)
+      || Buffer.from(body.ratchetMessage, 'base64').length > MAX_RATCHET_MESSAGE_BYTES) {
     return 'invalid or oversized ratchetMessage';
   }
   if (!ALLOWED_CONTENT_TYPES.includes(body.contentType)) return 'invalid contentType';
+
+  if (body.createdAt !== undefined && body.createdAt !== null) {
+    if (typeof body.createdAt !== 'string' || body.createdAt.length > 40
+        || !Number.isFinite(Date.parse(body.createdAt))) {
+      return 'invalid createdAt';
+    }
+  }
+
   if (body.kind === 'handshake') {
     const h = body.handshake;
     if (!h || typeof h !== 'object') return 'missing handshake payload';
@@ -127,7 +131,42 @@ function validateEnvelope(body) {
   return null;
 }
 
-const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
+/**
+ * The envelope as it will be stored and relayed: only known fields (the old
+ * code forwarded the whole request body, so unknown fields were relayed to the
+ * recipient verbatim), and `createdAt` is the sender's time clamped so it can't
+ * sit in the future and sort ahead of everything.
+ * Call after `validateEnvelope` succeeded.
+ */
+function normalizeEnvelope(body, nowMs = Date.now()) {
+  let createdMs = body.createdAt ? Date.parse(body.createdAt) : nowMs;
+  createdMs = Math.min(createdMs, nowMs + MAX_CLOCK_SKEW_MS);
+
+  let handshake = null;
+  if (body.kind === 'handshake') {
+    const h = body.handshake;
+    handshake = {
+      identityAgreementKey: h.identityAgreementKey,
+      identitySigningKey: h.identitySigningKey,
+      senderUsername: h.senderUsername ?? null,
+      ephemeralPublicKey: h.ephemeralPublicKey,
+      usedSignedPreKeyId: h.usedSignedPreKeyId,
+      usedOneTimePreKeyId: h.usedOneTimePreKeyId ?? null,
+    };
+  }
+
+  return {
+    id: body.id,
+    conversationId: body.conversationId,
+    senderId: body.senderId,
+    recipientId: body.recipientId,
+    kind: body.kind,
+    handshake,
+    ratchetMessage: body.ratchetMessage,
+    contentType: body.contentType,
+    createdAt: new Date(createdMs).toISOString(),
+  };
+}
 
 module.exports = {
   X25519_KEY_BYTES,
@@ -137,9 +176,12 @@ module.exports = {
   ALLOWED_CONTENT_TYPES,
   isValidUsername,
   isValidUserId,
+  isValidUuid,
+  isValidOpaqueId,
   isValidUInt32,
   validateBundleUpload,
   validateSignedPreKeyUpload,
   validateOneTimePreKeyBatch,
   validateEnvelope,
+  normalizeEnvelope,
 };

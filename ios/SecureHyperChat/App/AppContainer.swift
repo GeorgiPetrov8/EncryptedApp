@@ -35,7 +35,7 @@ final class AppContainer: ObservableObject {
     let presenceService: PresenceService
     let profileService: ProfileService
     let recoveryService: RecoveryService
-    /// NEW: APNs registration.
+    /// APNs registration.
     let pushService: PushService
     let ntfyService: NtfyService
 
@@ -140,6 +140,7 @@ final class AppContainer: ObservableObject {
             authService: authService
         )
 
+        
         self.recoveryService = RecoveryService(
             api: RecoveryAPI(tokenStore: tokenStore),
             database: database,
@@ -150,8 +151,17 @@ final class AppContainer: ObservableObject {
             messageRepository: messageRepository,
             notePadRepository: notePadRepository,
             alarmRepository: alarmRepository,
-            messagingService: messagingService
+            messagingService: messagingService,
+            proveChallenge: { [cryptoService] challenge in
+                guard cryptoService.hasIdentity(forUserId: challenge.userId) else {
+                    throw AuthError.noLocalIdentityForAccount
+                }
+
+                try cryptoService.loadIdentityFromKeychain(userId: challenge.userId)
+                return try cryptoService.signChallenge(challenge)
+            }
         )
+
 
         // MARK: Send handlers
 
@@ -180,6 +190,7 @@ final class AppContainer: ObservableObject {
         invitationService.setSendHandler { [weak messagingService] payload, conversation in
             try await messagingService?.sendControlPayload(payload, kind: .invite, in: conversation)
         }
+
         let notePadService = self.notePadService
         invitationService.setFlushHandler { [weak messagingService, weak notePadService] conversation in
             await messagingService?.flushQueuedMessages(in: conversation)
@@ -229,10 +240,9 @@ final class AppContainer: ObservableObject {
 
         // MARK: Reconnect → catch up
         //
-        // FIX: after the socket comes back, fetch what was queued while it was
-        // down and send pad edits that couldn't go out. Skipped if a backfill
-        // is already running (two at once could process the same envelope
-        // concurrently).
+        // After the socket comes back, fetch what was queued while it was down and
+        // send pad edits that couldn't go out. Skipped if a backfill is already
+        // running (two at once could process the same envelope concurrently).
         webSocketService.setReconnectHandler { [weak self] in
             Task { @MainActor in
                 guard let self, let userId = self.authService.currentUserId else { return }
@@ -244,7 +254,6 @@ final class AppContainer: ObservableObject {
         }
 
         // MARK: Change forwarding
-
         let forwarded: [AnyPublisher<Void, Never>] = [
             authService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             messagingService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
@@ -289,6 +298,9 @@ final class AppContainer: ObservableObject {
             // Read now: the session token is cleared right after this handler.
             pushService.unregister(bearer: tokenStore.currentToken)
             self.ntfyService.signedOut(bearer: tokenStore.currentToken)
+            // NEW — last on purpose: the two calls above still need this session to
+            // be valid when they reach the server, so it is only ended afterwards.
+            Self.revokeServerSession(bearer: tokenStore.currentToken)
             Task { await self.callService.hangUp() }
             self.messagingService.stopListening()
             self.presenceService.stop()
@@ -323,6 +335,29 @@ final class AppContainer: ObservableObject {
             .store(in: &cancellables)
 
         mediaEncryptionService.pruneCache()
+    }
+
+    /// Ends this session on the server (`POST /auth/logout`).
+    ///
+    /// Logging out used to forget the token on the phone only; the server kept
+    /// honouring it for 30 days. Sent after a short delay so the push-token and
+    /// ntfy requests fired just before it reach the server while the session
+    /// still exists. Best effort: if the device is offline the token simply
+    /// expires on its own, as before.
+    private static func revokeServerSession(bearer: String?) {
+        guard !NetworkConfiguration.useMockBackend,
+              let bearer,
+              let url = URL(string: "/auth/logout", relativeTo: NetworkConfiguration.baseURL)?.absoluteURL
+        else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: .seconds(3))
+            _ = try? await URLSession.shared.data(for: request)
+        }
     }
 
     static func bootstrap() -> AppContainer {

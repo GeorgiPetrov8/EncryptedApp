@@ -18,11 +18,11 @@ settings:
     SWIFT_VERSION: "5.9"
     # GIF provider. Put your key from partner.klipy.com here (or in Xcode ->
     # Build Settings -> User-Defined). Never commit a real key.
-    GIF_API_KEY: "1VLFh7l2O4NQuZCow7ry79l9xW1mEVd12bbXzQBwbR7KMScxHnlPJ24EhsGzgWJB"
+    GIF_API_KEY: ""
     GIF_API_HOST: "api.klipy.com"
   configs:
     Debug:
-      API_BASE_URL: "http://127.0.0.1:8080"
+      API_BASE_URL: "http://127.0.0.1:8080" #TODO CHANGE
       USE_MOCK_BACKEND: "NO"
     Release:
       API_BASE_URL: "https://chat.yourdomain.example"
@@ -76,6 +76,12 @@ targets:
         USE_MOCK_BACKEND: "$(USE_MOCK_BACKEND)"
         GIF_API_KEY: "$(GIF_API_KEY)"
         GIF_API_HOST: "$(GIF_API_HOST)"
+        # The server's ntfy notifications set Click: hyperchat:// — tapping one
+        # opens this app only if the scheme is registered here.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.SecureHyperChat.app
+            CFBundleURLSchemes:
+              - hyperchat
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         UIBackgroundModes:

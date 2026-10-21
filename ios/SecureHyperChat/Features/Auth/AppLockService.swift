@@ -13,17 +13,17 @@ final class AppLockService: ObservableObject {
         didSet { UserDefaults.standard.set(autoLockMinutes, forKey: Keys.minutes) }
     }
 
-    /// FIX (Bug #24): drives the privacy overlay.
+    /// Drives the privacy overlay (Bug #24).
     ///
     /// iOS captures the app-switcher snapshot on the transition to `.inactive`, which
-    /// happens *before* `.background`. The old code only handled `.background`, so by
-    /// the time anything reacted the screenshot of the open conversation had already
-    /// been taken — and it persists in the switcher even with App Lock enabled.
+    /// happens *before* `.background`, so the overlay has to appear then.
     ///
-    /// This is deliberately independent of `isEnabled`: the snapshot leaks message
-    /// content regardless of whether the user opted into biometric locking.
+    /// Deliberately independent of `isEnabled`: the snapshot leaks message content
+    /// regardless of whether the user opted into biometric locking.
     @Published private(set) var isObscured = false
 
+    /// When the app actually went to the background. Cleared as soon as it has been
+    /// consulted — see `appWillEnterForeground`.
     private var backgroundedAt: Date?
 
     private enum Keys {
@@ -38,7 +38,7 @@ final class AppLockService: ObservableObject {
         isLocked = enabled
     }
 
-    /// FIX (Bug #24): called on `.inactive`, before the snapshot is taken.
+    /// Called on `.inactive`, before the snapshot is taken.
     func appWillResignActive() {
         isObscured = true
     }
@@ -51,13 +51,23 @@ final class AppLockService: ObservableObject {
     func appWillEnterForeground() {
         defer {
             // Only reveal content once we're certain it isn't about to be locked.
-            // If App Lock engages, `AppLockView` covers the screen anyway and the
-            // overlay is redundant.
+            // If App Lock engages, `AppLockView` covers the screen anyway.
             isObscured = false
         }
         guard isEnabled else { return }
-        guard let backgroundedAt else { return }
-        let elapsedMinutes = Date().timeIntervalSince(backgroundedAt) / 60
+
+        // FIX: this timestamp was never cleared.
+        //
+        // The scene goes `.inactive` -> `.active` — without ever reaching
+        // `.background` — when Control Center, a notification banner or a system
+        // alert is pulled down. The `.active` handler then compared "now" with a
+        // `backgroundedAt` left over from the *previous* real backgrounding and
+        // locked the app in the middle of typing. A timestamp is only meaningful
+        // for the one return that follows the background that set it.
+        guard let leftAt = backgroundedAt else { return }
+        backgroundedAt = nil
+
+        let elapsedMinutes = Date().timeIntervalSince(leftAt) / 60
         if elapsedMinutes >= autoLockMinutes {
             isLocked = true
         }

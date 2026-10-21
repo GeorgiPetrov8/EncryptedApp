@@ -3,17 +3,14 @@
 const { sendJson, sendError, nowIso } = require('../json');
 const { readBody } = require('../router');
 const { validateBundleUpload } = require('../validate');
-const { issueToken } = require('../auth');
+const { issueToken, resolveToken, revokeToken, extractBearerToken } = require('../auth');
 const { rateLimit } = require('../rateLimit');
 const { issueChallenge, consumeChallenge } = require('../challenge');
 
-/**
- * POST /auth/register  { username, bundle } -> { userId, token }
- */
+/** POST /auth/register  { username, bundle } -> { userId, token } */
 function registerRoute(store, limiters) {
   return async (req, res) => {
     if (!rateLimit(limiters.auth, req, res)) return;
-
     const body = await readBody(req);
     if (typeof body.username !== 'string' || !body.bundle) {
       return sendError(res, 400, 'badRequest', 'Missing username or bundle');
@@ -23,9 +20,8 @@ function registerRoute(store, limiters) {
     if (body.bundle.username !== body.username) {
       return sendError(res, 400, 'badRequest', 'username and bundle.username must match');
     }
-
-    // A deleted account's name is never handed out again: whoever got it
-    // would inherit the trust its old contacts placed in that name.
+    // A deleted account's name is never handed out again: whoever got it would
+    // inherit the trust its old contacts placed in that name.
     if (store.stmt.accountByUsername.get(body.username) || store.stmt.isUsernameRetired.get(body.username)) {
       return sendError(res, 409, 'usernameTaken', 'That username is already taken.');
     }
@@ -61,9 +57,7 @@ function registerRoute(store, limiters) {
   };
 }
 
-/**
- * POST /auth/login/challenge  { username } -> { nonce, userId, expiresAt }
- */
+/** POST /auth/login/challenge  { username } -> { nonce, userId, expiresAt } */
 function loginChallengeRoute(store, limiters) {
   return async (req, res) => {
     if (!rateLimit(limiters.auth, req, res)) return;
@@ -77,9 +71,7 @@ function loginChallengeRoute(store, limiters) {
   };
 }
 
-/**
- * POST /auth/login  { username, nonce, signature } -> { userId, token }
- */
+/** POST /auth/login  { username, nonce, signature } -> { userId, token } */
 function loginRoute(store, limiters) {
   return async (req, res) => {
     if (!rateLimit(limiters.auth, req, res)) return;
@@ -89,7 +81,6 @@ function loginRoute(store, limiters) {
     }
     const account = store.stmt.accountByUsername.get(body.username);
     if (!account) return sendError(res, 404, 'userNotFound', 'No such user.');
-
     const result = consumeChallenge(store, account, body.nonce, body.signature);
     if (!result.ok) {
       return sendError(res, result.code === 'badRequest' ? 400 : 401, result.code, result.message);
@@ -99,4 +90,20 @@ function loginRoute(store, limiters) {
   };
 }
 
-module.exports = { registerRoute, loginChallengeRoute, loginRoute };
+/**
+ * POST /auth/logout -> 204
+ *
+ * Ends THIS session on the server. Before this existed a token lived its full
+ * 30 days whatever the user did. Idempotent: an unknown or already-revoked token
+ * also answers 204. A WebSocket opened with the token notices within one
+ * heartbeat and closes (see server.js).
+ */
+function logoutRoute(store) {
+  return async (req, res) => {
+    const token = extractBearerToken(req);
+    if (resolveToken(store, token)) revokeToken(store, token);
+    res.writeHead(204).end();
+  };
+}
+
+module.exports = { registerRoute, loginChallengeRoute, loginRoute, logoutRoute };

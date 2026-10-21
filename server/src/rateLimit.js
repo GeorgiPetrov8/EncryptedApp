@@ -3,16 +3,10 @@
 const { sendError } = require('./json');
 
 /**
- * Fixed-window rate limiter, keyed by client IP + route bucket.
+ * Fixed-window rate limiter keyed by a string (client IP, account id, ...).
  *
- * In-memory, per-process. That is the right amount of complexity for a
- * single-instance deployment; the moment you run more than one server
- * process behind a load balancer, this needs to move to Redis (`INCR` +
- * `EXPIRE`, or a sliding-window Lua script) so limits are shared across
- * instances instead of each instance granting its own separate quota. The
- * function signature below (`take(key) -> boolean`) is deliberately the
- * same shape a Redis-backed version would have, so that swap doesn't touch
- * any route handler.
+ * In-memory and per-process: right for one instance. Behind several instances
+ * it needs Redis, with the same `take(key) -> boolean` shape.
  */
 class RateLimiter {
   constructor({ windowMs, max }) {
@@ -33,7 +27,7 @@ class RateLimiter {
     return true;
   }
 
-  /** Periodic sweep so the Map doesn't grow unboundedly under high IP churn. */
+  /** Drops expired windows so the map can't grow without bound. */
   sweep() {
     const now = Date.now();
     for (const [key, entry] of this.hits) {
@@ -42,39 +36,52 @@ class RateLimiter {
   }
 }
 
+/** "1.2.3.4:5555" and "[::1]:443" -> the bare address. */
+function stripPort(value) {
+  const v = String(value).trim();
+  const bracketed = v.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketed) return bracketed[1];
+  if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(v)) return v.slice(0, v.lastIndexOf(':'));
+  return v;
+}
+
 function clientIp(req) {
-  // Trust X-Forwarded-For only when running behind the bundled Caddy reverse
-  // proxy (see Caddyfile), which sets it and discards any client-supplied
-  // copy. Do not enable this if the server is ever exposed directly.
+  // Behind exactly one trusted proxy (the bundled Caddy), the proxy's own entry
+  // is the LAST one in X-Forwarded-For; anything a client sent sits to its
+  // left. Reading the first entry — as this used to — trusts the attacker.
+  // Never enable TRUST_PROXY if the server is reachable directly.
   const forwarded = req.headers['x-forwarded-for'];
   if (process.env.TRUST_PROXY === '1' && forwarded) {
-    return forwarded.split(',')[0].trim();
+    const parts = String(forwarded).split(',');
+    return stripPort(parts[parts.length - 1]);
   }
   return req.socket.remoteAddress || 'unknown';
 }
 
-/**
- * Deliberately stricter for auth/registration endpoints than for message
- * sending — the former is where credential-stuffing and account-creation
- * abuse show up, the latter is where a legitimate chatty client lives.
- */
+const HOUR = 60 * 60 * 1000;
+
 function makeLimiters() {
   return {
-    auth: new RateLimiter({ windowMs: 60_000, max: 10 }), // register/login
+    auth: new RateLimiter({ windowMs: 60_000, max: 10 }),
     prekeys: new RateLimiter({ windowMs: 60_000, max: 30 }),
     messages: new RateLimiter({ windowMs: 60_000, max: 120 }),
     media: new RateLimiter({ windowMs: 60_000, max: 30 }),
     directory: new RateLimiter({ windowMs: 60_000, max: 60 }),
+    // Recovery email / codes (keyed by account or address, not IP):
+    emailPerAddress: new RateLimiter({ windowMs: HOUR, max: 3 }),
+    codesPerAccount: new RateLimiter({ windowMs: HOUR, max: 5 }),
+    codeChecks: new RateLimiter({ windowMs: HOUR, max: 30 }),
+    // How often one account may take a one-time prekey of one other account.
+    bundlePair: new RateLimiter({ windowMs: HOUR, max: 3 }),
   };
 }
 
 function rateLimit(limiter, req, res) {
-  const key = clientIp(req);
-  if (!limiter.take(key)) {
+  if (!limiter.take(clientIp(req))) {
     sendError(res, 429, 'rateLimited', 'Too many requests. Try again shortly.');
     return false;
   }
   return true;
 }
 
-module.exports = { makeLimiters, rateLimit, clientIp, RateLimiter };
+module.exports = { makeLimiters, rateLimit, clientIp, stripPort, RateLimiter };

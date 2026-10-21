@@ -5,11 +5,15 @@ struct RecoveryEmailStatus: Decodable, Equatable {
         let sizeBytes: Int
         let updatedAt: Date
     }
+
     let email: String?
     let verified: Bool
     /// Address a verification code was just sent to, not yet confirmed.
     let pendingEmail: String?
     let backup: BackupInfo?
+    /// NEW. `false` when the server has no email provider set up, so the app can
+    /// say so instead of reporting a code as sent. Absent on older servers.
+    var mailConfigured: Bool? = nil
 }
 
 struct RecoveryTicket: Decodable, Equatable {
@@ -42,8 +46,8 @@ enum RecoveryAPIError: LocalizedError {
 /// HTTP client for the recovery endpoints.
 ///
 /// Separate from `APIClientProtocol` on purpose: half of these calls are made
-/// while signed out (on a brand-new device), and none of them belong in the
-/// mock backend.
+/// while signed out (on a brand-new device), and none of them belong in the mock
+/// backend.
 final class RecoveryAPI {
     private let baseURL: URL
     private let tokenStore: SessionTokenStore
@@ -61,6 +65,34 @@ final class RecoveryAPI {
         try await json("GET", "/account/email", auth: true)
     }
 
+    /// Asks the server to send a verification code to `email`.
+    ///
+    /// The server now requires proof that this device holds the account's keys: a
+    /// leaked session token alone could otherwise attach an attacker's address and
+    /// take the account over through recovery. `prove` is the same signer used for
+    /// `deleteAccountOnServer(prove:)` — it signs the server's one-time nonce with
+    /// the identity key.
+    func requestEmailCode(_ email: String, prove: ChallengeSigner) async throws {
+        let challenge: LoginChallenge = try await json(
+            "POST", "/account/challenge", body: [String: String](), auth: true
+        )
+        let signature = try await prove(challenge)
+        try await send(
+            "POST", "/account/email",
+            body: [
+                "email": email,
+                "nonce": challenge.nonce,
+                "signature": signature.base64EncodedString(),
+            ],
+            auth: true
+        )
+    }
+
+    /// Unsigned variant. A server with the default configuration answers
+    /// `proofRequired`; it only works against one run with
+    /// `ALLOW_UNSIGNED_EMAIL_CHANGE=1`. Call sites should move to
+    /// `requestEmailCode(_:prove:)`.
+    @available(*, deprecated, message: "The server requires a signature from this device's key. Use requestEmailCode(_:prove:).")
     func requestEmailCode(_ email: String) async throws {
         try await send("POST", "/account/email", body: ["email": email], auth: true)
     }
@@ -110,7 +142,12 @@ final class RecoveryAPI {
     // MARK: Plumbing
 
     private func makeRequest(_ method: String, _ path: String, auth: Bool) throws -> URLRequest {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        // FIX: `URL(string:relativeTo:)`, like `RealAPIClient` — not
+        // `appendingPathComponent`, which mishandles a leading "/".
+        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
+            throw RecoveryAPIError.unexpected(0)
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         if auth {
             guard let token = tokenStore.currentToken else { throw RecoveryAPIError.notSignedIn }

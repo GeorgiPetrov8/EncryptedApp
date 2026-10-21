@@ -81,6 +81,7 @@ final class RecoveryService: ObservableObject {
     private let alarmRepository: AlarmRepository
     private let messagingService: MessagingService
     private let logger = Logger(subsystem: "com.georgipetrov.securehyperchat", category: "recovery")
+    private let proveChallenge: ChallengeSigner
 
     init(
         api: RecoveryAPI,
@@ -92,7 +93,8 @@ final class RecoveryService: ObservableObject {
         messageRepository: MessageRepository,
         notePadRepository: NotePadRepository,
         alarmRepository: AlarmRepository,
-        messagingService: MessagingService
+        messagingService: MessagingService,
+        proveChallenge: @escaping ChallengeSigner
     ) {
         self.api = api
         self.database = database
@@ -104,6 +106,7 @@ final class RecoveryService: ObservableObject {
         self.notePadRepository = notePadRepository
         self.alarmRepository = alarmRepository
         self.messagingService = messagingService
+        self.proveChallenge = proveChallenge
     }
 
     // MARK: Recovery email (signed in)
@@ -113,7 +116,10 @@ final class RecoveryService: ObservableObject {
     }
 
     func requestEmailCode(_ email: String) async throws {
-        try await api.requestEmailCode(email.trimmingCharacters(in: .whitespacesAndNewlines))
+        try await api.requestEmailCode(
+            email.trimmingCharacters(in: .whitespacesAndNewlines),
+            prove: proveChallenge
+        )
         await refreshEmailStatus()
     }
 

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  P4: one file-protection level for the whole app.
+
+  "Complete until first user authentication": files are encrypted while the
+  phone is off / not yet unlocked after a restart, and readable after the first
+  unlock. This is what the database, attachments and avatars already use
+  explicitly, and what an alarm or a ntfy-opened app needs while the screen is
+  locked. ("Complete" made every file the app forgot to mark unreadable the
+  moment the phone locked, while the database itself was opened with the
+  weaker class anyway.)
+
+  Short-lived decrypted exports still use `.complete` explicitly (MediaExporter).
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.default-data-protection</key>
+	<string>NSFileProtectionCompleteUntilFirstUserAuthentication</string>
+</dict>
+</plist>

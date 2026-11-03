@@ -1,0 +1,365 @@
+{
+ "version": 1,
+ "items": [
+  {
+   "id": "fun.01",
+   "category": "fun",
+   "title": "Selfie with a stranger's dog",
+   "detail": "Ask nicely first. Send the proof."
+  },
+  {
+   "id": "fun.02",
+   "category": "fun",
+   "title": "Speak only in questions",
+   "detail": "For the next 15 minutes of chatting, every message must be a question."
+  },
+  {
+   "id": "fun.03",
+   "category": "fun",
+   "title": "Recreate an old photo",
+   "detail": "Pick a photo of yourself from 5+ years ago and recreate it."
+  },
+  {
+   "id": "fun.04",
+   "category": "fun",
+   "title": "Voice message in an accent",
+   "detail": "Tell me about your day in your best fake accent."
+  },
+  {
+   "id": "fun.05",
+   "category": "fun",
+   "title": "Draw me from memory",
+   "detail": "60 seconds, no peeking at photos. Send the masterpiece."
+  },
+  {
+   "id": "fun.06",
+   "category": "fun",
+   "title": "Emoji-only story",
+   "detail": "Tell me what you did today using only emojis."
+  },
+  {
+   "id": "fun.07",
+   "category": "fun",
+   "title": "Dance break",
+   "detail": "Record 10 seconds of you dancing to the next song that plays."
+  },
+  {
+   "id": "fun.08",
+   "category": "fun",
+   "title": "Weird snack combo",
+   "detail": "Try a food combination you've never had and rate it out of 10."
+  },
+  {
+   "id": "fun.09",
+   "category": "fun",
+   "title": "Three-word review",
+   "detail": "Describe your week in exactly three words."
+  },
+  {
+   "id": "fun.10",
+   "category": "fun",
+   "title": "Hum a song",
+   "detail": "Hum a song in a voice message. I have to guess it."
+  },
+  {
+   "id": "fun.11",
+   "category": "fun",
+   "title": "Photo of something yellow",
+   "detail": "You have 5 minutes. Go."
+  },
+  {
+   "id": "fun.12",
+   "category": "fun",
+   "title": "Fake commercial",
+   "detail": "Sell me an object on your desk in a 20-second voice message."
+  },
+  {
+   "id": "romantic.01",
+   "category": "romantic",
+   "title": "Three things I love about you",
+   "detail": "Write them down — be specific."
+  },
+  {
+   "id": "romantic.02",
+   "category": "romantic",
+   "title": "Plan a dream date",
+   "detail": "Describe our perfect day, start to finish."
+  },
+  {
+   "id": "romantic.03",
+   "category": "romantic",
+   "title": "Our song",
+   "detail": "Send the song that reminds you of us, and why."
+  },
+  {
+   "id": "romantic.04",
+   "category": "romantic",
+   "title": "First impression",
+   "detail": "Tell me honestly what you thought when we first met."
+  },
+  {
+   "id": "romantic.05",
+   "category": "romantic",
+   "title": "Handwritten note",
+   "detail": "Write me a short note on paper and send a photo."
+  },
+  {
+   "id": "romantic.06",
+   "category": "romantic",
+   "title": "Favourite memory",
+   "detail": "Describe your favourite moment we've shared."
+  },
+  {
+   "id": "romantic.07",
+   "category": "romantic",
+   "title": "Compliment marathon",
+   "detail": "Send me one compliment every hour until bedtime."
+  },
+  {
+   "id": "romantic.08",
+   "category": "romantic",
+   "title": "Future postcard",
+   "detail": "Write a postcard from a trip we'll take one day."
+  },
+  {
+   "id": "romantic.09",
+   "category": "romantic",
+   "title": "Love letter in 50 words",
+   "detail": "Exactly 50 words. Count them."
+  },
+  {
+   "id": "romantic.10",
+   "category": "romantic",
+   "title": "Photo of where you'd kiss me",
+   "detail": "Somewhere around you right now."
+  },
+  {
+   "id": "romantic.11",
+   "category": "romantic",
+   "title": "Tiny surprise",
+   "detail": "Do something small and kind for me this week without telling me what."
+  },
+  {
+   "id": "romantic.12",
+   "category": "romantic",
+   "title": "Good-morning voice note",
+   "detail": "Record a good-morning message for me to hear tomorrow."
+  },
+  {
+   "id": "cozy.01",
+   "category": "cozy",
+   "title": "Tea or coffee date",
+   "detail": "Make a drink at the same time and video-call while you have it."
+  },
+  {
+   "id": "cozy.02",
+   "category": "cozy",
+   "title": "Book swap",
+   "detail": "Recommend a book or film, and promise to try mine."
+  },
+  {
+   "id": "cozy.03",
+   "category": "cozy",
+   "title": "Same movie, two places",
+   "detail": "Start the same film at the same time and text during it."
+  },
+  {
+   "id": "cozy.04",
+   "category": "cozy",
+   "title": "Blanket fort",
+   "detail": "Build one and send a photo."
+  },
+  {
+   "id": "cozy.05",
+   "category": "cozy",
+   "title": "Cook the same dish",
+   "detail": "Pick a recipe and both make it tonight."
+  },
+  {
+   "id": "cozy.06",
+   "category": "cozy",
+   "title": "Sunset photo",
+   "detail": "Send me a photo of today's sky at sunset."
+  },
+  {
+   "id": "cozy.07",
+   "category": "cozy",
+   "title": "Playlist for a rainy day",
+   "detail": "Make five songs. Send the list."
+  },
+  {
+   "id": "cozy.08",
+   "category": "cozy",
+   "title": "Gratitude list",
+   "detail": "Three small things that made today better."
+  },
+  {
+   "id": "cozy.09",
+   "category": "cozy",
+   "title": "Phone-free hour",
+   "detail": "No phone for one hour, then tell me what you did."
+  },
+  {
+   "id": "cozy.10",
+   "category": "cozy",
+   "title": "Pyjama check",
+   "detail": "Show me your comfiest outfit."
+  },
+  {
+   "id": "cozy.11",
+   "category": "cozy",
+   "title": "Bedtime story",
+   "detail": "Tell me a short made-up story in a voice message."
+  },
+  {
+   "id": "cozy.12",
+   "category": "cozy",
+   "title": "Window view",
+   "detail": "Send a photo of the view from your window right now."
+  },
+  {
+   "id": "adventure.01",
+   "category": "adventure",
+   "title": "New route home",
+   "detail": "Take a way home you've never taken. Send a photo of something new."
+  },
+  {
+   "id": "adventure.02",
+   "category": "adventure",
+   "title": "Try a new place",
+   "detail": "Eat or drink somewhere you've never been this week."
+  },
+  {
+   "id": "adventure.03",
+   "category": "adventure",
+   "title": "10,000 steps",
+   "detail": "Hit 10k steps today and screenshot it."
+  },
+  {
+   "id": "adventure.04",
+   "category": "adventure",
+   "title": "Sunrise mission",
+   "detail": "Watch a sunrise this week. Proof required."
+  },
+  {
+   "id": "adventure.05",
+   "category": "adventure",
+   "title": "Learn a phrase",
+   "detail": "Learn how to say something nice in a new language and send it."
+  },
+  {
+   "id": "adventure.06",
+   "category": "adventure",
+   "title": "Mini road trip",
+   "detail": "Pick a town within an hour and plan a day there for us."
+  },
+  {
+   "id": "adventure.07",
+   "category": "adventure",
+   "title": "Cold shower",
+   "detail": "30 seconds, finish cold. Report back."
+  },
+  {
+   "id": "adventure.08",
+   "category": "adventure",
+   "title": "Hidden gem",
+   "detail": "Find a spot in your city most people don't know about."
+  },
+  {
+   "id": "adventure.09",
+   "category": "adventure",
+   "title": "Climb something",
+   "detail": "A hill, stairs to a rooftop, a tower — send the view."
+  },
+  {
+   "id": "adventure.10",
+   "category": "adventure",
+   "title": "Talk to a stranger",
+   "detail": "Start a conversation with someone new and tell me about it."
+  },
+  {
+   "id": "adventure.11",
+   "category": "adventure",
+   "title": "Bucket list swap",
+   "detail": "Each of us adds three things to a shared bucket list."
+  },
+  {
+   "id": "adventure.12",
+   "category": "adventure",
+   "title": "Picnic plan",
+   "detail": "Plan a picnic for us: place, food, music."
+  },
+  {
+   "id": "spicy.01",
+   "category": "spicy",
+   "title": "Describe our best kiss",
+   "detail": "In as much detail as you remember."
+  },
+  {
+   "id": "spicy.02",
+   "category": "spicy",
+   "title": "Flirty voice note",
+   "detail": "Send me something flirty — 15 seconds, your best voice."
+  },
+  {
+   "id": "spicy.03",
+   "category": "spicy",
+   "title": "Outfit for our next date",
+   "detail": "Pick what you want me to wear and tell me why."
+  },
+  {
+   "id": "spicy.04",
+   "category": "spicy",
+   "title": "Secret compliment",
+   "detail": "Tell me something you find irresistible about me that you've never said."
+  },
+  {
+   "id": "spicy.05",
+   "category": "spicy",
+   "title": "Slow-dance date",
+   "detail": "Next time we meet: one slow dance, no music required."
+  },
+  {
+   "id": "spicy.06",
+   "category": "spicy",
+   "title": "Wink selfie",
+   "detail": "Your most charming look. Go."
+  },
+  {
+   "id": "spicy.07",
+   "category": "spicy",
+   "title": "Three-sentence fantasy date",
+   "detail": "Describe it in exactly three sentences."
+  },
+  {
+   "id": "spicy.08",
+   "category": "spicy",
+   "title": "Lip-sync a love song",
+   "detail": "Video or it didn't happen."
+  },
+  {
+   "id": "spicy.09",
+   "category": "spicy",
+   "title": "Teasing countdown",
+   "detail": "Text me one hint per hour about what you'll do when you see me."
+  },
+  {
+   "id": "spicy.10",
+   "category": "spicy",
+   "title": "Truth or dare (mild)",
+   "detail": "I ask, you answer — or you take the dare I pick."
+  },
+  {
+   "id": "spicy.11",
+   "category": "spicy",
+   "title": "Steal a kiss",
+   "detail": "The next time we meet, you have to steal a kiss before hello."
+  },
+  {
+   "id": "spicy.12",
+   "category": "spicy",
+   "title": "Rate my look",
+   "detail": "Next photo I send — rate it honestly, with reasons."
+  }
+ ]
+}
